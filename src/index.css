@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.book-viewport {
+  perspective: 2400px;
+  transform-style: preserve-3d;
+}
+
+.book-chassis {
+  position: relative;
+  transform-style: preserve-3d;
+  box-shadow:
+    0 28px 60px -12px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 0 6px #181a22,
+    0 0 0 7px rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: #14161d;
+}
+
+.page-half {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  overflow: hidden;
+  background-color: #f8f8f5;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flip-leaf {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  transform-style: preserve-3d;
+  z-index: 30;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.flip-leaf.origin-left {
+  left: 50%;
+  transform-origin: left center;
+}
+
+.flip-leaf.origin-right {
+  left: 0;
+  transform-origin: right center;
+}
+
+.leaf-face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background-color: #f8f8f5;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.leaf-back {
+  transform: rotateY(180deg);
+}
+
+.center-crease {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 36px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 40;
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.12) 28%,
+    rgba(0, 0, 0, 0.38) 47%,
+    rgba(255, 255, 255, 0.14) 50%,
+    rgba(0, 0, 0, 0.42) 53%,
+    rgba(0, 0, 0, 0.12) 72%,
+    rgba(0, 0, 0, 0) 100%
+  );
+}
