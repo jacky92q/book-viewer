@@ -11,10 +11,21 @@ import {
   Minimize2,
   BookOpen,
   Columns,
-  FileArchive
+  FileArchive,
+  Library,
+  X
 } from 'lucide-react';
 import { unzip } from 'fflate';
 import PageCurl from './PageCurl';
+import { kvDel, kvGet, kvSet } from './storage';
+import {
+  ensureReadPermission,
+  getArchiveFile,
+  listArchives,
+  pickLibraryDir,
+  supportsDirPicker,
+  type LibraryDirHandle
+} from './library';
 import { clampCurlPoint, curlProgress, type Pt } from './pageCurl';
 
 interface RawImageFile {
@@ -39,6 +50,25 @@ interface SpreadPage {
 
 type ReadingDirection = 'rtl' | 'ltr';
 type ViewMode = 'spread' | 'split' | 'pair';
+
+type BookSource = 'single' | 'library' | 'queue';
+
+interface SavedBook {
+  name: string;
+  blob: Blob;
+  source: BookSource;
+}
+
+interface SavedProgress {
+  name: string;
+  index: number;
+  viewMode: ViewMode;
+  readingDirection: ReadingDirection;
+}
+
+interface LoadOpts {
+  source?: BookSource;
+}
 
 interface CurlState {
   side: 'left' | 'right';
@@ -96,6 +126,19 @@ export default function App() {
   });
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
   const hudTimerRef = useRef<number | null>(null);
+  const [libraryNames, setLibraryNames] = useState<string[]>([]);
+  const [libraryOpen, setLibraryOpen] = useState<boolean>(false);
+  const [currentBookName, setCurrentBookName] = useState<string>('');
+  const currentBookRef = useRef<{ name: string; source: BookSource } | null>(null);
+  const libraryRef = useRef<{ handle: LibraryDirHandle | null; names: string[] | null }>({
+    handle: null,
+    names: null
+  });
+  const queueRef = useRef<File[]>([]);
+  const goNextBookRef = useRef<() => void>(() => {});
+  const endIntentRef = useRef<number | null>(null);
+  const restoredRef = useRef<boolean>(false);
+  const noticeTimerRef = useRef<number | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [notice, setNotice] = useState<string>('');
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -187,6 +230,39 @@ export default function App() {
     };
   }, [immersive, showHud]);
 
+  // 앱을 켜면 마지막으로 보던 책을 자동으로 복원
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    void (async () => {
+      const [book, dir] = await Promise.all([
+        kvGet<SavedBook>('lastBook'),
+        kvGet<LibraryDirHandle>('dirHandle')
+      ]);
+      if (dir) libraryRef.current = { handle: dir, names: null };
+      if (!book) return;
+      const file =
+        book.blob instanceof File ? book.blob : new File([book.blob], book.name, { type: book.blob.type });
+      await loadArchive(file, { source: book.source });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 보던 페이지 위치 저장
+  useEffect(() => {
+    const cur = currentBookRef.current;
+    if (!cur || rawFiles.length === 0) return;
+    const t = window.setTimeout(() => {
+      void kvSet('progress', {
+        name: cur.name,
+        index: currentIndex,
+        viewMode,
+        readingDirection
+      } satisfies SavedProgress);
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [currentIndex, viewMode, readingDirection, rawFiles.length, currentBookName]);
+
   // Build spreads based on viewMode and readingDirection
   const pages = useMemo<SpreadPage[]>(() => {
     if (rawFiles.length === 0) return [];
@@ -259,16 +335,23 @@ export default function App() {
     }
   }, [soundEnabled]);
 
-  const applyBook = (title: string, items: { name: string; url: string }[]) => {
+  const flashNotice = (msg: string, ms = 3500) => {
+    setNotice(msg);
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(''), ms);
+  };
+
+  const applyBook = (title: string, items: { name: string; url: string }[], index = 0) => {
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
     setBookTitle(title);
     setRawFiles(items);
-    setCurrentIndex(0);
+    setCurrentIndex(index);
     setCurl(null);
   };
 
-  /** zip / cbz 압축파일 한 권을 풀어서 이미지들을 이름 순으로 불러온다 */
-  const loadArchive = async (archive: File) => {
+  /** zip / cbz 압축파일 한 권을 풀어서 이미지들을 이름 순으로 불러온다. 저장된 진행 위치가 있으면 이어서 보여준다. */
+  const loadArchive = async (archive: File, opts: LoadOpts = {}) => {
+    const source = opts.source ?? 'single';
     setLoading(true);
     setNotice(`"${archive.name}" 압축을 푸는 중…`);
     try {
@@ -296,8 +379,24 @@ export default function App() {
         const blob = new Blob([entries[path]], { type: MIME_BY_EXT[ext] || 'image/jpeg' });
         return { name: path.split('/').pop() || path, url: URL.createObjectURL(blob) };
       });
-      applyBook(archive.name.replace(ARCHIVE_EXT, ''), items);
+
+      // 같은 책이면 마지막으로 보던 위치에서 이어서
+      const saved = await kvGet<SavedProgress>('progress');
+      let index = 0;
+      if (saved && saved.name === archive.name) {
+        if (saved.viewMode) setViewMode(saved.viewMode);
+        if (saved.readingDirection) setReadingDirection(saved.readingDirection);
+        index = Math.max(0, saved.index || 0);
+      }
+
+      currentBookRef.current = { name: archive.name, source };
+      setCurrentBookName(archive.name);
+      applyBook(archive.name.replace(ARCHIVE_EXT, ''), items, index);
       setNotice('');
+
+      // 앱을 껐다 켜도 이어볼 수 있게 이 책을 앱 저장소에 보관 (한 권만 유지)
+      void kvSet('lastBook', { name: archive.name, blob: archive, source } satisfies SavedBook);
+      void navigator.storage?.persist?.();
     } catch {
       setNotice(`"${archive.name}" 압축을 풀 수 없어요 (손상되었거나 암호가 걸린 파일일 수 있어요)`);
     } finally {
@@ -308,9 +407,13 @@ export default function App() {
   const handleLoadFiles = (fileList: FileList | File[]) => {
     const all = Array.from(fileList);
 
-    const archive = all.find((f) => ARCHIVE_EXT.test(f.name));
-    if (archive) {
-      void loadArchive(archive);
+    const archives = all
+      .filter((f) => ARCHIVE_EXT.test(f.name))
+      .sort((a, b) => collator.compare(a.name, b.name));
+    if (archives.length > 0) {
+      // 여러 권을 한꺼번에 고르면 이름 순으로 이어서 본다
+      queueRef.current = archives.length > 1 ? archives : [];
+      void loadArchive(archives[0], { source: archives.length > 1 ? 'queue' : 'single' });
       return;
     }
     if (all.some((f) => /\.(alz|rar|7z|egg)$/i.test(f.name))) {
@@ -327,6 +430,13 @@ export default function App() {
       return collator.compare(pathA, pathB);
     });
 
+    // 폴더/사진으로 연 책은 이어보기 대상이 아니므로 저장된 기록을 지운다
+    currentBookRef.current = null;
+    setCurrentBookName('');
+    queueRef.current = [];
+    void kvDel('lastBook');
+    void kvDel('progress');
+
     const rel = (imgs[0] as File & { webkitRelativePath?: string }).webkitRelativePath;
     applyBook(
       rel && rel.includes('/') ? rel.split('/')[0] : `만화책 묶음 (${imgs.length}장)`,
@@ -334,6 +444,99 @@ export default function App() {
     );
     setNotice('');
   };
+
+  /** 책 폴더에서 이름으로 한 권을 열기 */
+  const loadFromLibrary = async (name: string) => {
+    const handle = libraryRef.current.handle;
+    if (!handle) return;
+    try {
+      if (!(await ensureReadPermission(handle))) {
+        flashNotice('폴더 읽기 권한이 필요해요. "책 폴더"에서 다시 선택해 주세요');
+        return;
+      }
+      const file = await getArchiveFile(handle, name);
+      await loadArchive(file, { source: 'library' });
+    } catch {
+      flashNotice(`"${name}" 을(를) 열 수 없어요. 폴더가 이동되었는지 확인해 주세요`);
+    }
+  };
+
+  /** 책 폴더 연결: 이 폴더 안의 압축파일들이 "같은 레벨의 책"이 된다 */
+  const openLibraryFolder = async () => {
+    if (!supportsDirPicker()) {
+      flashNotice(
+        '이 브라우저는 폴더 연결을 지원하지 않아요. 압축파일을 여러 개 한꺼번에 선택하면 순서대로 이어서 볼 수 있어요',
+        6000
+      );
+      archiveInputRef.current?.click();
+      return;
+    }
+    try {
+      const handle = await pickLibraryDir();
+      const names = await listArchives(handle);
+      if (names.length === 0) {
+        flashNotice('이 폴더에서 zip/cbz 파일을 찾지 못했어요');
+        return;
+      }
+      libraryRef.current = { handle, names };
+      setLibraryNames(names);
+      void kvSet('dirHandle', handle);
+
+      const saved = await kvGet<SavedProgress>('progress');
+      const start = saved && names.includes(saved.name) ? saved.name : names[0];
+      queueRef.current = [];
+      await loadFromLibrary(start);
+    } catch {
+      // 사용자가 폴더 선택을 취소함
+    }
+  };
+
+  /** 마지막 페이지에서 더 넘기면 같은 레벨의 다음 압축파일을 불러온다 */
+  const goNextBook = async () => {
+    if (loading) return;
+    const cur = currentBookRef.current;
+
+    // 1) 한꺼번에 고른 여러 권
+    if (queueRef.current.length > 0 && cur) {
+      const i = queueRef.current.findIndex((f) => f.name === cur.name);
+      if (i >= 0) {
+        const next = queueRef.current[i + 1];
+        if (next) void loadArchive(next, { source: 'queue' });
+        else flashNotice('마지막 권이에요');
+        return;
+      }
+    }
+
+    // 2) 연결해 둔 책 폴더
+    const lib = libraryRef.current;
+    if (lib.handle && cur?.source === 'library') {
+      try {
+        if (!(await ensureReadPermission(lib.handle))) {
+          flashNotice('다음 권을 열려면 폴더 읽기 권한이 필요해요. 다시 넘기면 권한을 물어봐요', 5000);
+          return;
+        }
+        if (!lib.names) {
+          lib.names = await listArchives(lib.handle);
+          setLibraryNames(lib.names);
+        }
+        const i = lib.names.indexOf(cur.name);
+        const next = i >= 0 ? lib.names[i + 1] : undefined;
+        if (next) await loadFromLibrary(next);
+        else flashNotice(i >= 0 ? '마지막 권이에요' : '폴더에서 현재 책을 찾지 못했어요');
+      } catch {
+        flashNotice('폴더에 접근할 수 없어요. "책 폴더"로 다시 연결해 주세요', 5000);
+      }
+      return;
+    }
+
+    // 3) 폴더 정보가 없으면 직접 고르게 한다
+    flashNotice(
+      '다음 권을 선택해 주세요. (자동으로 이어 보려면 "책 폴더"로 폴더를 연결하세요)',
+      6000
+    );
+    archiveInputRef.current?.click();
+  };
+  goNextBookRef.current = () => void goNextBook();
 
   const getSliceStyle = (desc?: HalfDescriptor): React.CSSProperties => {
     if (!desc) return {};
@@ -418,6 +621,10 @@ export default function App() {
       const delta =
         readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
       const nextIdx = currentIndex + delta;
+      if (delta > 0 && nextIdx >= pages.length) {
+        goNextBookRef.current();
+        return;
+      }
       if (nextIdx < 0 || nextIdx >= pages.length) return;
 
       const w = chassis.offsetWidth / 2;
@@ -453,6 +660,12 @@ export default function App() {
     const delta =
       readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
     const nextIdx = currentIndex + delta;
+    if (delta > 0 && nextIdx >= pages.length) {
+      // 마지막 페이지: 손을 뗄 때(사용자 동작 중) 다음 권을 불러온다
+      endIntentRef.current = e.pointerId;
+      chassis.setPointerCapture(e.pointerId);
+      return;
+    }
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
     // 잡은 높이를 가까운 위/아래 모서리 쪽으로 끌어당겨 모서리부터 말려 올라오는 느낌을 준다
@@ -501,6 +714,11 @@ export default function App() {
   };
 
   const handleCurlUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (endIntentRef.current === e.pointerId) {
+      endIntentRef.current = null;
+      goNextBookRef.current();
+      return;
+    }
     const d = dragRef.current;
     if (!d || d.pointerId !== e.pointerId || !curl) return;
     dragRef.current = null;
@@ -518,6 +736,7 @@ export default function App() {
   };
 
   const handleCurlCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (endIntentRef.current === e.pointerId) endIntentRef.current = null;
     const d = dragRef.current;
     if (!d || d.pointerId !== e.pointerId || !curl) return;
     dragRef.current = null;
@@ -587,6 +806,7 @@ export default function App() {
           <input
             ref={archiveInputRef}
             type="file"
+            multiple
             accept=".zip,.cbz,.alz,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip"
             className="hidden"
             onChange={(e) => {
@@ -602,6 +822,24 @@ export default function App() {
             className="hidden"
             onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
           />
+
+          <button
+            onClick={() => void openLibraryFolder()}
+            title="책 폴더를 연결하면 마지막 페이지에서 다음 권이 자동으로 열려요"
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center gap-1.5"
+          >
+            <Library className="w-4 h-4 text-amber-300" />
+            <span className="hidden md:inline">책 폴더</span>
+          </button>
+
+          {libraryNames.length > 0 && (
+            <button
+              onClick={() => setLibraryOpen(true)}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium"
+            >
+              목록
+            </button>
+          )}
 
           <button
             onClick={() => archiveInputRef.current?.click()}
@@ -819,6 +1057,42 @@ export default function App() {
           </button>
         </div>
       </footer>
+      )}
+
+      {libraryOpen && (
+        <div
+          className="absolute inset-0 z-[60] bg-black/70 flex items-center justify-center p-4"
+          onClick={() => setLibraryOpen(false)}
+        >
+          <div
+            className="w-full max-w-md max-h-[80vh] flex flex-col rounded-2xl bg-slate-900 border border-slate-700"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+              <h2 className="text-sm font-bold">책 목록 ({libraryNames.length}권)</h2>
+              <button onClick={() => setLibraryOpen(false)} className="p-1 rounded hover:bg-slate-800">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <ul className="overflow-y-auto p-2">
+              {libraryNames.map((n) => (
+                <li key={n}>
+                  <button
+                    onClick={() => {
+                      setLibraryOpen(false);
+                      void loadFromLibrary(n);
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm truncate hover:bg-slate-800 ${
+                      n === currentBookName ? 'bg-indigo-600/30 text-indigo-200' : ''
+                    }`}
+                  >
+                    {n}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       )}
 
       {/* 몰입 모드 오버레이: 잠깐 나타났다 사라지는 메뉴 + 얇은 진행바 */}
