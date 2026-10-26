@@ -9,8 +9,10 @@ import {
   ChevronRight,
   Maximize2,
   BookOpen,
-  Columns
+  Columns,
+  FileArchive
 } from 'lucide-react';
+import { unzip } from 'fflate';
 import PageCurl from './PageCurl';
 import { clampCurlPoint, curlProgress, type Pt } from './pageCurl';
 
@@ -62,6 +64,18 @@ interface DragInfo {
   moved: boolean;
 }
 
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const ARCHIVE_EXT = /\.(zip|cbz)$/i;
+const MIME_BY_EXT: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+  avif: 'image/avif'
+};
+
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 export default function App() {
@@ -73,6 +87,8 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
   const [zoom, setZoom] = useState<number>(1);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [notice, setNotice] = useState<string>('');
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
   // Page curl state (포인터를 따라 접히는 페이지)
@@ -81,6 +97,7 @@ export default function App() {
   const animatingRef = useRef<boolean>(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const filesInputRef = useRef<HTMLInputElement>(null);
+  const archiveInputRef = useRef<HTMLInputElement>(null);
   const chassisRef = useRef<HTMLDivElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -166,10 +183,66 @@ export default function App() {
     }
   }, [soundEnabled]);
 
+  const applyBook = (title: string, items: { name: string; url: string }[]) => {
+    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
+    setBookTitle(title);
+    setRawFiles(items);
+    setCurrentIndex(0);
+    setCurl(null);
+  };
+
+  /** zip / cbz 압축파일 한 권을 풀어서 이미지들을 이름 순으로 불러온다 */
+  const loadArchive = async (archive: File) => {
+    setLoading(true);
+    setNotice(`"${archive.name}" 압축을 푸는 중…`);
+    try {
+      const data = new Uint8Array(await archive.arrayBuffer());
+      const entries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+        unzip(
+          data,
+          {
+            filter: (file) =>
+              IMAGE_EXT.test(file.name) &&
+              !file.name.split('/').some((part) => part.startsWith('.') || part === '__MACOSX')
+          },
+          (err, out) => (err ? reject(err) : resolve(out))
+        );
+      });
+
+      const names = Object.keys(entries).sort((a, b) => collator.compare(a, b));
+      if (names.length === 0) {
+        setNotice(`"${archive.name}" 안에서 이미지를 찾지 못했어요`);
+        return;
+      }
+
+      const items = names.map((path) => {
+        const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+        const blob = new Blob([entries[path]], { type: MIME_BY_EXT[ext] || 'image/jpeg' });
+        return { name: path.split('/').pop() || path, url: URL.createObjectURL(blob) };
+      });
+      applyBook(archive.name.replace(ARCHIVE_EXT, ''), items);
+      setNotice('');
+    } catch {
+      setNotice(`"${archive.name}" 압축을 풀 수 없어요 (손상되었거나 암호가 걸린 파일일 수 있어요)`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLoadFiles = (fileList: FileList | File[]) => {
-    const imgs = Array.from(fileList).filter(
-      (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name)
-    );
+    const all = Array.from(fileList);
+
+    const archive = all.find((f) => ARCHIVE_EXT.test(f.name));
+    if (archive) {
+      void loadArchive(archive);
+      return;
+    }
+    if (all.some((f) => /\.(alz|rar|7z|egg)$/i.test(f.name))) {
+      setNotice('알집 전용(.alz)·rar·7z 형식은 아직 열 수 없어요. zip 또는 cbz 형식으로 압축해 주세요');
+      return;
+    }
+
+    const imgs = all.filter((f) => f.type.startsWith('image/') || IMAGE_EXT.test(f.name));
     if (imgs.length === 0) return;
 
     imgs.sort((a, b) => {
@@ -178,16 +251,12 @@ export default function App() {
       return collator.compare(pathA, pathB);
     });
 
-    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
-    const nextRaw = imgs.map((f) => ({
-      name: f.name,
-      url: URL.createObjectURL(f)
-    }));
-
     const rel = (imgs[0] as File & { webkitRelativePath?: string }).webkitRelativePath;
-    setBookTitle(rel && rel.includes('/') ? rel.split('/')[0] : `만화책 묶음 (${imgs.length}장)`);
-    setRawFiles(nextRaw);
-    setCurrentIndex(0);
+    applyBook(
+      rel && rel.includes('/') ? rel.split('/')[0] : `만화책 묶음 (${imgs.length}장)`,
+      imgs.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
+    );
+    setNotice('');
   };
 
   const getSliceStyle = (desc?: HalfDescriptor): React.CSSProperties => {
@@ -403,9 +472,10 @@ export default function App() {
           <div className="min-w-0">
             <h1 className="font-bold text-sm sm:text-base truncate">{bookTitle}</h1>
             <p className="text-[11px] text-slate-400 truncate">
-              {pages.length > 0
-                ? `${currentIndex + 1} / ${pages.length} 페이지 · ${currentSpread?.title}`
-                : '폴더 열기 또는 사진 파일들을 드래그 앤 드롭하세요'}
+              {notice ||
+                (pages.length > 0
+                  ? `${currentIndex + 1} / ${pages.length} 페이지 · ${currentSpread?.title}`
+                  : '압축파일(zip/cbz)·폴더·사진 파일을 선택하거나 드래그 앤 드롭하세요')}
             </p>
           </div>
         </div>
@@ -422,6 +492,16 @@ export default function App() {
             onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
           />
           <input
+            ref={archiveInputRef}
+            type="file"
+            accept=".zip,.cbz,.alz,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip"
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files) handleLoadFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
+          <input
             ref={filesInputRef}
             type="file"
             multiple
@@ -431,11 +511,19 @@ export default function App() {
           />
 
           <button
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => archiveInputRef.current?.click()}
             className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold flex items-center gap-1.5"
           >
+            <FileArchive className="w-4 h-4" />
+            <span>압축파일 열기</span>
+          </button>
+
+          <button
+            onClick={() => folderInputRef.current?.click()}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center gap-1.5"
+          >
             <FolderOpen className="w-4 h-4" />
-            <span>폴더 뭉탱이 열기</span>
+            <span className="hidden md:inline">폴더 열기</span>
           </button>
 
           <button
@@ -498,13 +586,15 @@ export default function App() {
       >
         {pages.length === 0 ? (
           <div
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => archiveInputRef.current?.click()}
             className="max-w-lg w-full p-10 rounded-3xl border-2 border-dashed border-slate-700 hover:border-indigo-500 bg-slate-900/60 flex flex-col items-center text-center cursor-pointer transition"
           >
             <FolderOpen className="w-14 h-14 text-indigo-400 mb-4" />
-            <h2 className="text-lg font-bold text-white">만화책 폴더나 이미지들을 선택해 주세요</h2>
+            <h2 className="text-lg font-bold text-white">
+              {loading ? '압축을 푸는 중…' : '만화책 압축파일(zip/cbz)이나 폴더를 선택해 주세요'}
+            </h2>
             <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              폴더 통째로 불러오기 또는 여러 장의 스캔 이미지를 한 번에 선택하면 갤럭시 폴드 스타일의 3D 책 넘김 모션으로 감상할 수 있습니다.
+              압축파일 한 권을 선택하면 자동으로 풀어서 첫 페이지부터 보여줘요. 폴더 통째로 불러오기 또는 여러 장의 스캔 이미지를 한 번에 선택해도 갤럭시 폴드 스타일의 3D 책 넘김 모션으로 감상할 수 있습니다.
             </p>
           </div>
         ) : (
