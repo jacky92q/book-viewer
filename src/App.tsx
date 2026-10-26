@@ -11,6 +11,8 @@ import {
   BookOpen,
   Columns
 } from 'lucide-react';
+import PageCurl from './PageCurl';
+import { clampCurlPoint, curlProgress, type Pt } from './pageCurl';
 
 interface RawImageFile {
   name: string;
@@ -35,6 +37,31 @@ interface SpreadPage {
 type ReadingDirection = 'rtl' | 'ltr';
 type ViewMode = 'spread' | 'split' | 'pair';
 
+interface CurlState {
+  side: 'left' | 'right';
+  nextIdx: number;
+  w: number;
+  h: number;
+  g: Pt;
+  m: Pt;
+}
+
+interface DragInfo {
+  pointerId: number;
+  side: 'left' | 'right';
+  nextIdx: number;
+  w: number;
+  h: number;
+  scale: number;
+  g: Pt;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastT: number;
+  vx: number;
+  moved: boolean;
+}
+
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 export default function App() {
@@ -48,13 +75,10 @@ export default function App() {
   const [zoom, setZoom] = useState<number>(1);
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
-  // Flip animation state
-  const [flipSide, setFlipSide] = useState<'left' | 'right' | null>(null);
-  const [flipProgress, setFlipProgress] = useState<number>(0);
-  const [targetIndex, setTargetIndex] = useState<number | null>(null);
-
-  const isDraggingRef = useRef<boolean>(false);
-  const dragStartXRef = useRef<number>(0);
+  // Page curl state (포인터를 따라 접히는 페이지)
+  const [curl, setCurl] = useState<CurlState | null>(null);
+  const dragRef = useRef<DragInfo | null>(null);
+  const animatingRef = useRef<boolean>(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const filesInputRef = useRef<HTMLInputElement>(null);
   const chassisRef = useRef<HTMLDivElement>(null);
@@ -189,43 +213,171 @@ export default function App() {
     };
   };
 
-  const animateTurn = useCallback(
-    (side: 'left' | 'right', nextIdx: number, startP: number, endP: number, duration = 480) => {
-      setFlipSide(side);
-      setTargetIndex(nextIdx);
-      if (endP === 1 && startP < 0.25) playPageSound();
-
+  /**
+   * 접힌 페이지를 애니메이션으로 이동시킨다.
+   * pathFn(t) 은 t(0~1) 에서의 끌려온 위치(페이지 좌표)를 돌려준다.
+   */
+  const animateCurl = useCallback(
+    (
+      base: Omit<CurlState, 'm'>,
+      pathFn: (t: number) => Pt,
+      duration: number,
+      ease: (t: number) => number,
+      onDone: () => void
+    ) => {
+      animatingRef.current = true;
       const t0 = performance.now();
       const step = (now: number) => {
         const t = Math.min(1, (now - t0) / duration);
-        const eased = 1 - Math.pow(1 - t, 3);
-        const p = startP + (endP - startP) * eased;
-        setFlipProgress(p);
+        const m = clampCurlPoint(pathFn(ease(t)), base.g, base.w, base.h);
         if (t < 1) {
+          setCurl({ ...base, m });
           requestAnimationFrame(step);
         } else {
-          if (endP === 1) setCurrentIndex(nextIdx);
-          setFlipSide(null);
-          setTargetIndex(null);
-          setFlipProgress(0);
+          animatingRef.current = false;
+          onDone();
         }
       };
       requestAnimationFrame(step);
     },
-    [playPageSound]
+    []
+  );
+
+  const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+
+  /** 현재 접힌 상태에서 끝까지 넘기거나(complete) 원래대로 되돌린다 */
+  const finishCurl = useCallback(
+    (base: CurlState, complete: boolean) => {
+      const from = base.m;
+      const to: Pt = complete ? { x: -base.w, y: base.g.y } : base.g;
+      if (complete) playPageSound();
+      animateCurl(
+        base,
+        (t) => ({ x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t }),
+        complete ? 340 : 240,
+        easeOut,
+        () => {
+          if (complete) setCurrentIndex(base.nextIdx);
+          setCurl(null);
+        }
+      );
+    },
+    [animateCurl, playPageSound]
   );
 
   const triggerSideTurn = useCallback(
     (side: 'left' | 'right') => {
-      if (flipSide !== null || pages.length <= 1) return;
+      const chassis = chassisRef.current;
+      if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
       const delta =
         readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
       const nextIdx = currentIndex + delta;
       if (nextIdx < 0 || nextIdx >= pages.length) return;
-      animateTurn(side, nextIdx, 0, 1);
+
+      const w = chassis.offsetWidth / 2;
+      const h = chassis.offsetHeight;
+      const g: Pt = { x: w, y: h };
+      const base = { side, nextIdx, w, h, g };
+      playPageSound();
+      animateCurl(
+        base,
+        (t) => ({ x: g.x - 2 * w * t, y: g.y - Math.sin(Math.PI * t) * h * 0.16 }),
+        620,
+        easeInOut,
+        () => {
+          setCurrentIndex(nextIdx);
+          setCurl(null);
+        }
+      );
     },
-    [flipSide, pages.length, readingDirection, currentIndex, animateTurn]
+    [curl, pages.length, readingDirection, currentIndex, animateCurl, playPageSound]
   );
+
+  const handleCurlDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const chassis = chassisRef.current;
+    if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
+    const rect = chassis.getBoundingClientRect();
+    const scale = rect.width / chassis.offsetWidth || 1;
+    const w = chassis.offsetWidth / 2;
+    const h = chassis.offsetHeight;
+    const cx = (e.clientX - rect.left) / scale;
+    const cy = (e.clientY - rect.top) / scale;
+
+    const side: 'left' | 'right' = cx < w ? 'left' : 'right';
+    const delta =
+      readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
+    const nextIdx = currentIndex + delta;
+    if (nextIdx < 0 || nextIdx >= pages.length) return;
+
+    // 잡은 높이를 가까운 위/아래 모서리 쪽으로 끌어당겨 모서리부터 말려 올라오는 느낌을 준다
+    const edgeY = cy < h / 2 ? 0 : h;
+    const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
+    const g: Pt = { x: w, y: gy };
+
+    dragRef.current = {
+      pointerId: e.pointerId,
+      side,
+      nextIdx,
+      w,
+      h,
+      scale,
+      g,
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastT: performance.now(),
+      vx: 0,
+      moved: false
+    };
+    setCurl({ side, nextIdx, w, h, g, m: g });
+    chassis.setPointerCapture(e.pointerId);
+  };
+
+  const handleCurlMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    const dxClient = e.clientX - d.startX;
+    const dyClient = e.clientY - d.startY;
+    if (Math.abs(dxClient) + Math.abs(dyClient) > 6) d.moved = true;
+
+    const now = performance.now();
+    const dt = Math.max(1, now - d.lastT);
+    const inst = (e.clientX - d.lastX) / dt;
+    d.vx = d.vx * 0.6 + inst * 0.4;
+    d.lastX = e.clientX;
+    d.lastT = now;
+
+    // 오른쪽 페이지는 왼쪽으로, 왼쪽 페이지는 오른쪽으로 끌면 제본선 쪽으로 접힌다
+    const dxLocal = (d.side === 'right' ? dxClient : -dxClient) / d.scale;
+    const dyLocal = dyClient / d.scale;
+    const m = clampCurlPoint({ x: d.g.x + dxLocal, y: d.g.y + dyLocal }, d.g, d.w, d.h);
+    setCurl({ side: d.side, nextIdx: d.nextIdx, w: d.w, h: d.h, g: d.g, m });
+  };
+
+  const handleCurlUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId || !curl) return;
+    dragRef.current = null;
+
+    const progress = curlProgress(curl.m, d.w);
+    // 제본선 쪽으로 향하는 속도(px/ms)
+    const towardSpine = d.side === 'right' ? -d.vx : d.vx;
+    let complete: boolean;
+    if (!d.moved) complete = true; // 탭 = 그냥 넘기기
+    else if (towardSpine > 0.5) complete = true;
+    else if (towardSpine < -0.5) complete = false;
+    else complete = progress > 0.3;
+
+    finishCurl(curl, complete);
+  };
+
+  const handleCurlCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId || !curl) return;
+    dragRef.current = null;
+    finishCurl(curl, false);
+  };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -237,7 +389,8 @@ export default function App() {
   }, [triggerSideTurn]);
 
   const currentSpread = pages[currentIndex];
-  const nextSpread = targetIndex !== null ? pages[targetIndex] : undefined;
+  const nextSpread = curl ? pages[curl.nextIdx] : undefined;
+  const flipSide = curl?.side ?? null;
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0b0d13] text-slate-100">
@@ -380,40 +533,10 @@ export default function App() {
                 transform: `scale(${zoom})`
               }}
               className="book-chassis cursor-grab active:cursor-grabbing"
-              onPointerDown={(e) => {
-                if (flipSide !== null || pages.length <= 1 || !chassisRef.current) return;
-                const rect = chassisRef.current.getBoundingClientRect();
-                const side: 'left' | 'right' = e.clientX - rect.left < rect.width / 2 ? 'left' : 'right';
-                const delta =
-                  readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
-                const nextIdx = currentIndex + delta;
-                if (nextIdx < 0 || nextIdx >= pages.length) return;
-
-                isDraggingRef.current = true;
-                dragStartXRef.current = e.clientX;
-                setFlipSide(side);
-                setTargetIndex(nextIdx);
-                setFlipProgress(0.02);
-                chassisRef.current.setPointerCapture(e.pointerId);
-              }}
-              onPointerMove={(e) => {
-                if (!isDraggingRef.current || !chassisRef.current || !flipSide) return;
-                const rect = chassisRef.current.getBoundingClientRect();
-                const dx = e.clientX - dragStartXRef.current;
-                const rawP =
-                  flipSide === 'right' ? -dx / (rect.width * 0.65) : dx / (rect.width * 0.65);
-                setFlipProgress(Math.max(0.01, Math.min(0.99, rawP)));
-              }}
-              onPointerUp={(e) => {
-                if (!isDraggingRef.current || !flipSide || targetIndex === null) return;
-                isDraggingRef.current = false;
-                const dist = Math.abs(e.clientX - dragStartXRef.current);
-                if (dist < 12 || flipProgress >= 0.22) {
-                  animateTurn(flipSide, targetIndex, flipProgress, 1, 360);
-                } else {
-                  animateTurn(flipSide, targetIndex, flipProgress, 0, 260);
-                }
-              }}
+              onPointerDown={handleCurlDown}
+              onPointerMove={handleCurlMove}
+              onPointerUp={handleCurlUp}
+              onPointerCancel={handleCurlCancel}
             >
               {/* Base Left Page */}
               <div className="page-half left-0 rounded-l-[10px]">
@@ -435,31 +558,17 @@ export default function App() {
                 />
               </div>
 
-              {/* 3D Flipping Leaf */}
-              {flipSide && nextSpread && (
-                <div
-                  className={`flip-leaf ${flipSide === 'right' ? 'origin-left' : 'origin-right'}`}
-                  style={{
-                    transform: `rotateY(${
-                      flipSide === 'right' ? -180 * flipProgress : 180 * flipProgress
-                    }deg)`
-                  }}
-                >
-                  <div className="leaf-face">
-                    <div
-                      className="w-full h-full bg-no-repeat"
-                      style={getSliceStyle(
-                        flipSide === 'right' ? currentSpread.right : currentSpread.left
-                      )}
-                    />
-                  </div>
-                  <div className="leaf-face leaf-back">
-                    <div
-                      className="w-full h-full bg-no-repeat"
-                      style={getSliceStyle(flipSide === 'right' ? nextSpread.left : nextSpread.right)}
-                    />
-                  </div>
-                </div>
+              {/* 포인터를 따라 접히는 페이지 */}
+              {curl && nextSpread && currentSpread && (
+                <PageCurl
+                  side={curl.side}
+                  w={curl.w}
+                  h={curl.h}
+                  g={curl.g}
+                  m={curl.m}
+                  front={getSliceStyle(curl.side === 'right' ? currentSpread.right : currentSpread.left)}
+                  back={getSliceStyle(curl.side === 'right' ? nextSpread.left : nextSpread.right)}
+                />
               )}
 
               {creaseEnabled && <div className="center-crease" />}
