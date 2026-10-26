@@ -48,3 +48,9 @@
     rgba(0, 0, 0, 0) 100%
   );
 }
+
+.book-chassis-bare {
+  box-shadow: none;
+  border-radius: 0;
+  background: #000;
+}

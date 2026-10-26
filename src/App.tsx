@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Maximize2,
+  Minimize2,
   BookOpen,
   Columns,
   FileArchive
@@ -87,6 +88,14 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
   const [zoom, setZoom] = useState<number>(1);
+  const [immersive, setImmersive] = useState<boolean>(false);
+  const [hudVisible, setHudVisible] = useState<boolean>(true);
+  const [viewport, setViewport] = useState<{ w: number; h: number }>({
+    w: window.innerWidth,
+    h: window.innerHeight
+  });
+  const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
+  const hudTimerRef = useRef<number | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [notice, setNotice] = useState<string>('');
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -110,6 +119,73 @@ export default function App() {
     window.addEventListener('beforeinstallprompt', handler);
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
+
+  // 화면 크기 추적 (전체화면 전환·회전 포함)
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // 첫 이미지의 실제 비율을 읽어서 화면에 맞춘다
+  const firstUrl = rawFiles[0]?.url;
+  useEffect(() => {
+    if (!firstUrl) {
+      setImgSize(null);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
+    img.src = firstUrl;
+  }, [firstUrl]);
+
+  const showHud = useCallback(() => {
+    setHudVisible(true);
+    if (hudTimerRef.current) window.clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = window.setTimeout(() => setHudVisible(false), 2500);
+  }, []);
+
+  const toggleImmersive = useCallback(async () => {
+    if (!immersive) {
+      setImmersive(true);
+      showHud();
+      try {
+        await document.documentElement.requestFullscreen?.();
+      } catch {
+        // 전체화면 API를 못 쓰는 브라우저(iOS 등)에서는 UI만 숨긴 몰입 모드로 동작
+      }
+    } else {
+      setImmersive(false);
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+      } catch {
+        // ignore
+      }
+    }
+  }, [immersive, showHud]);
+
+  // Esc 등으로 브라우저 전체화면이 풀리면 몰입 모드도 같이 종료
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) setImmersive(false);
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  // 몰입 모드에서 마우스를 움직이거나 위쪽을 터치하면 잠깐 메뉴를 보여준다
+  useEffect(() => {
+    if (!immersive) return;
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' || e.clientY < 90) showHud();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerdown', onMove);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onMove);
+    };
+  }, [immersive, showHud]);
 
   // Build spreads based on viewMode and readingDirection
   const pages = useMemo<SpreadPage[]>(() => {
@@ -452,18 +528,35 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'ArrowLeft') triggerSideTurn('left');
       else if (e.key === 'ArrowRight') triggerSideTurn('right');
+      else if (e.key === 'f' || e.key === 'F') void toggleImmersive();
+      else if (e.key === 'Escape' && immersive) void toggleImmersive();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [triggerSideTurn]);
+  }, [triggerSideTurn, toggleImmersive, immersive]);
 
   const currentSpread = pages[currentIndex];
   const nextSpread = curl ? pages[curl.nextIdx] : undefined;
   const flipSide = curl?.side ?? null;
 
+  // 책 크기: 이미지 비율을 유지하면서 가능한 영역을 최대한 채운다
+  const bookAspect = imgSize
+    ? (viewMode === 'pair' ? 2 : 1) * (imgSize.w / imgSize.h)
+    : 1.5;
+  const boxW = immersive ? viewport.w : Math.min(viewport.w * 0.86, 960);
+  const boxH = immersive ? viewport.h : Math.min(viewport.h * 0.76, 720);
+  let chassisW = boxW;
+  let chassisH = chassisW / bookAspect;
+  if (chassisH > boxH) {
+    chassisH = boxH;
+    chassisW = chassisH * bookAspect;
+  }
+  const pageRadius = immersive ? '' : 'rounded-l-[10px]';
+
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#0b0d13] text-slate-100">
+    <div className="h-dvh w-screen flex flex-col bg-[#0b0d13] text-slate-100 relative">
       {/* Header */}
+      {!immersive && (
       <header className="h-14 px-4 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shrink-0">
@@ -554,6 +647,15 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => void toggleImmersive()}
+            title="꽉 찬 화면 (F)"
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold flex items-center gap-1"
+          >
+            <Maximize2 className="w-4 h-4 text-sky-300" />
+            <span className="hidden lg:inline">꽉 찬 화면</span>
+          </button>
+
+          <button
             onClick={() => setSoundEnabled((s) => !s)}
             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700"
           >
@@ -574,10 +676,13 @@ export default function App() {
           )}
         </div>
       </header>
+      )}
 
       {/* Main Viewport */}
       <main
-        className="relative flex-1 flex items-center justify-center p-4 overflow-hidden book-viewport"
+        className={`relative flex-1 flex items-center justify-center overflow-hidden book-viewport ${
+          immersive ? 'p-0' : 'p-4'
+        }`}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
@@ -599,6 +704,7 @@ export default function App() {
           </div>
         ) : (
           <>
+            {!immersive && (
             <button
               onClick={() => triggerSideTurn('left')}
               className="absolute left-4 z-40 w-11 h-24 rounded-2xl bg-slate-900/70 hover:bg-slate-800 border border-white/10 flex flex-col items-center justify-center"
@@ -606,7 +712,9 @@ export default function App() {
               <ChevronLeft className="w-6 h-6" />
               <span className="text-[10px]">{readingDirection === 'rtl' ? '다음' : '이전'}</span>
             </button>
+            )}
 
+            {!immersive && (
             <button
               onClick={() => triggerSideTurn('right')}
               className="absolute right-4 z-40 w-11 h-24 rounded-2xl bg-slate-900/70 hover:bg-slate-800 border border-white/10 flex flex-col items-center justify-center"
@@ -614,22 +722,23 @@ export default function App() {
               <ChevronRight className="w-6 h-6" />
               <span className="text-[10px]">{readingDirection === 'rtl' ? '이전' : '다음'}</span>
             </button>
+            )}
 
             <div
               ref={chassisRef}
               style={{
-                width: 'min(86vw, 960px)',
-                height: 'min(76vh, 720px)',
+                width: chassisW,
+                height: chassisH,
                 transform: `scale(${zoom})`
               }}
-              className="book-chassis cursor-grab active:cursor-grabbing"
+              className={`book-chassis cursor-grab active:cursor-grabbing ${immersive ? 'book-chassis-bare' : ''}`}
               onPointerDown={handleCurlDown}
               onPointerMove={handleCurlMove}
               onPointerUp={handleCurlUp}
               onPointerCancel={handleCurlCancel}
             >
               {/* Base Left Page */}
-              <div className="page-half left-0 rounded-l-[10px]">
+              <div className={`page-half left-0 ${pageRadius}`}>
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(
@@ -639,7 +748,7 @@ export default function App() {
               </div>
 
               {/* Base Right Page */}
-              <div className="page-half right-0 rounded-r-[10px]">
+              <div className={`page-half right-0 ${immersive ? '' : 'rounded-r-[10px]'}`}>
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(
@@ -656,6 +765,7 @@ export default function App() {
                   h={curl.h}
                   g={curl.g}
                   m={curl.m}
+                  rounded={!immersive}
                   front={getSliceStyle(curl.side === 'right' ? currentSpread.right : currentSpread.left)}
                   back={getSliceStyle(curl.side === 'right' ? nextSpread.left : nextSpread.right)}
                 />
@@ -668,6 +778,7 @@ export default function App() {
       </main>
 
       {/* Bottom Bar */}
+      {!immersive && (
       <footer className="h-12 px-4 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between gap-4 shrink-0">
         <button
           onClick={() => setCreaseEnabled((c) => !c)}
@@ -700,16 +811,46 @@ export default function App() {
             +
           </button>
           <button
-            onClick={() => {
-              if (!document.fullscreenElement) document.documentElement.requestFullscreen();
-              else document.exitFullscreen();
-            }}
+            onClick={() => void toggleImmersive()}
+            title="꽉 찬 화면 (F)"
             className="p-1.5 rounded bg-slate-800 border border-slate-700"
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
         </div>
       </footer>
+      )}
+
+      {/* 몰입 모드 오버레이: 잠깐 나타났다 사라지는 메뉴 + 얇은 진행바 */}
+      {immersive && (
+        <>
+          <div
+            className={`absolute top-0 inset-x-0 z-50 px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent transition-opacity duration-300 ${
+              hudVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
+          >
+            <p className="text-xs text-slate-200 truncate">
+              {bookTitle} · {currentIndex + 1} / {pages.length}
+            </p>
+            <button
+              onClick={() => void toggleImmersive()}
+              className="px-3 py-1.5 rounded-lg bg-slate-900/80 border border-white/15 text-xs font-semibold flex items-center gap-1.5 shrink-0"
+            >
+              <Minimize2 className="w-4 h-4" />
+              <span>나가기 (Esc)</span>
+            </button>
+          </div>
+          <div className="absolute bottom-0 inset-x-0 h-[3px] bg-white/10 z-50 pointer-events-none">
+            <div
+              className="h-full bg-indigo-400/80 transition-all"
+              style={{
+                width: `${pages.length > 1 ? (currentIndex / (pages.length - 1)) * 100 : 0}%`,
+                marginLeft: readingDirection === 'rtl' ? 'auto' : undefined
+              }}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

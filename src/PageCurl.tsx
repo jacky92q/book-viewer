@@ -11,6 +11,7 @@ interface PageCurlProps {
   front: React.CSSProperties;
   /** 넘어간 뒤 보이는 뒷면 이미지 스타일 */
   back: React.CSSProperties;
+  rounded?: boolean;
 }
 
 const PAPER = '#f8f8f5';
@@ -21,7 +22,7 @@ const REVEAL_SHADE_LEN = 110;
  * 포인터를 따라 접히는 페이지.
  * 한쪽 페이지 크기(w x h)의 영역에 그리며, 왼쪽 페이지는 좌우를 뒤집은 좌표계로 계산한다.
  */
-export default function PageCurl({ side, w, h, g, m, front, back }: PageCurlProps) {
+export default function PageCurl({ side, w, h, g, m, front, back, rounded = true }: PageCurlProps) {
   const mirrored = side === 'left';
   const geo = computeCurl(g, m, w, h);
 
@@ -31,7 +32,7 @@ export default function PageCurl({ side, w, h, g, m, front, back }: PageCurlProp
       style={{
         ...fill,
         backgroundColor: PAPER,
-        borderRadius: mirrored ? '10px 0 0 10px' : '0 10px 10px 0',
+        borderRadius: !rounded ? 0 : mirrored ? '10px 0 0 10px' : '0 10px 10px 0',
         transform: mirrored ? 'scaleX(-1)' : undefined
       }}
     >
