@@ -52,13 +52,15 @@ interface DragState {
   pointerId: number;
   startX: number;
   startY: number;
+  lastX: number;
+  lastT: number;
+  vx: number;
   scale: number;
   w: number;
   h: number;
   cx: number;
   cy: number;
-  activeSide: 'left' | 'right';
-  nextIdx: number;
+  gy: number;
   moved: boolean;
 }
 
@@ -140,8 +142,8 @@ export default function App() {
       rawFiles.forEach((f, idx) => {
         list.push({
           title: f.name,
-          left: { url: f.url, slice: 'left-half', label: String(idx + 1) + "L" },
-          right: { url: f.url, slice: 'right-half', label: String(idx + 1) + "R" },
+          left: { url: f.url, slice: 'left-half', label: String(idx + 1) + 'L' },
+          right: { url: f.url, slice: 'right-half', label: String(idx + 1) + 'R' },
           thumbUrl: f.url,
         });
       });
@@ -154,16 +156,16 @@ export default function App() {
         const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
 
         list.push({
-          title: f.name + " (1/2)",
-          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + "-1" },
-          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + "-1" },
+          title: f.name + ' (1/2)',
+          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
           thumbUrl: f.url,
         });
 
         list.push({
-          title: f.name + " (2/2)",
-          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + "-2" },
-          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + "-2" },
+          title: f.name + ' (2/2)',
+          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
           thumbUrl: f.url,
         });
       });
@@ -176,7 +178,7 @@ export default function App() {
           const leftFile = readingDirection === 'rtl' ? f2 : f1;
           const rightFile = readingDirection === 'rtl' ? f1 : f2;
           list.push({
-            title: f1.name + " / " + f2.name,
+            title: f1.name + ' / ' + f2.name,
             left: { url: leftFile.url, slice: 'full', label: String(i + 1) },
             right: { url: rightFile.url, slice: 'full', label: String(i + 2) },
             thumbUrl: f1.url,
@@ -209,20 +211,20 @@ export default function App() {
     if (!desc) return {};
     if (desc.slice === 'left-half') {
       return {
-        backgroundImage: "url(" + desc.url + ")",
+        backgroundImage: 'url(' + desc.url + ')',
         backgroundSize: '200% 100%',
         backgroundPosition: '0% center',
       };
     }
     if (desc.slice === 'right-half') {
       return {
-        backgroundImage: "url(" + desc.url + ")",
+        backgroundImage: 'url(' + desc.url + ')',
         backgroundSize: '200% 100%',
         backgroundPosition: '100% center',
       };
     }
     return {
-      backgroundImage: "url(" + desc.url + ")",
+      backgroundImage: 'url(' + desc.url + ')',
       backgroundSize: 'contain',
       backgroundPosition: 'center center',
     };
@@ -349,12 +351,14 @@ export default function App() {
 
   // --- 책장 넘김 완료 애니메이션 (finishCurl) ---
   const finishCurl = useCallback(
-    (commit: boolean, c: CurlState) => {
+    (c: CurlState, complete: boolean) => {
       animatingRef.current = true;
 
-      const endX = commit ? -c.w : c.w;
       const startX = c.m.x;
       const startY = c.m.y;
+      // 완료 시 제본선 너머로 (-c.w), 취소(snap back) 시 원래 잡은 모서리(c.g)로 부드럽게 복귀
+      const targetX = complete ? -c.w : c.g.x;
+      const targetY = c.g.y;
       const startTime = performance.now();
       const duration = 220;
 
@@ -364,20 +368,19 @@ export default function App() {
         const ease = 1 - Math.pow(1 - progress, 3);
 
         const currM: Pt = {
-          x: startX + (endX - startX) * ease,
-          y: startY,
+          x: startX + (targetX - startX) * ease,
+          y: startY + (targetY - startY) * ease,
         };
 
-        setCurl((prev) => (prev ? { ...prev, m: currM } : null));
+        setCurl({ ...c, m: currM });
 
         if (progress < 1) {
           requestAnimationFrame(animate);
         } else {
-          if (commit) {
+          if (complete) {
             setCurrentIndex(c.nextIdx);
           }
           setCurl(null);
-          dragStateRef.current = null;
           animatingRef.current = false;
         }
       };
@@ -387,7 +390,7 @@ export default function App() {
     []
   );
 
-  // --- 제스처 이벤트 핸들러 (양방향 스와이프 감지) ---
+  // --- 제스처 이벤트 핸들러 ---
   const handleCurlDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const chassis = chassisRef.current;
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
@@ -402,19 +405,22 @@ export default function App() {
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
-    const initialSide: 'left' | 'right' = isSingle ? (cx < w / 2 ? 'left' : 'right') : (cx < w ? 'left' : 'right');
+    const edgeY = cy < h / 2 ? 0 : h;
+    const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
 
     dragStateRef.current = {
       pointerId: e.pointerId,
       startX: e.clientX,
       startY: e.clientY,
+      lastX: e.clientX,
+      lastT: performance.now(),
+      vx: 0,
       scale,
       w,
       h,
       cx,
       cy,
-      activeSide: initialSide,
-      nextIdx: currentIndex,
+      gy,
       moved: false,
     };
 
@@ -425,47 +431,40 @@ export default function App() {
     const d = dragStateRef.current;
     if (!d || d.pointerId !== e.pointerId) return;
 
+    const now = performance.now();
+    const dt = Math.max(1, now - d.lastT);
+    const inst = (e.clientX - d.lastX) / dt;
+    d.vx = d.vx * 0.6 + inst * 0.4;
+    d.lastX = e.clientX;
+    d.lastT = now;
+
     const dxClient = e.clientX - d.startX;
     const dyClient = e.clientY - d.startY;
 
-    if (Math.abs(dxClient) > 6) d.moved = true;
-
-    const isSingle = viewMode === 'split';
-    let side: 'left' | 'right';
-    let delta: number;
-
-    if (isSingle) {
-      if (dxClient < 0) {
-        side = 'right';
-        delta = 1;
-      } else {
-        side = 'left';
-        delta = -1;
-      }
-    } else {
-      if (dxClient < 0) {
-        side = 'right';
-        delta = readingDirection === 'rtl' ? -1 : 1;
-      } else {
-        side = 'left';
-        delta = readingDirection === 'rtl' ? 1 : -1;
-      }
+    if (Math.abs(dxClient) > 6 || Math.abs(dyClient) > 6) {
+      d.moved = true;
     }
+
+    if (!d.moved) return;
+
+    // 스와이프 방향:
+    // dxClient < 0 (우에서 좌로 쓸기) -> 다음 페이지 (delta = +1), 우측 페이지 컬 (side = 'right')
+    // dxClient > 0 (좌에서 우로 쓸기) -> 이전 페이지 (delta = -1), 좌측 페이지 컬 (side = 'left')
+    const side: 'left' | 'right' = dxClient < 0 ? 'right' : 'left';
+    const delta = dxClient < 0 ? 1 : -1;
 
     const nextIdx = currentIndex + delta;
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
-    d.activeSide = side;
-    d.nextIdx = nextIdx;
+    const g: Pt = { x: d.w, y: d.gy };
 
-    const edgeY = d.cy < d.h / 2 ? 0 : d.h;
-    const gy = Math.max(0, Math.min(d.h, d.cy * 0.3 + edgeY * 0.7));
-    const g: Pt = { x: d.w, y: gy };
-
+    // 로컬 좌표:
+    // side === 'right': x=d.w가 바깥쪽 우측 모서리, x=0이 제본선(좌측). dxClient < 0 일 때 m.x 감소
+    // side === 'left': x=d.w가 바깥쪽 좌측 모서리, x=0이 제본선(우측). dxClient > 0 일 때 m.x 감소
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
-    const mRaw: Pt = { x: d.w + dxLocal, y: gy + dyLocal };
+    const mRaw: Pt = { x: d.w + dxLocal, y: d.gy + dyLocal };
     const m = clampCurlPoint(mRaw, g, d.w, d.h);
 
     setCurl({ side, nextIdx, w: d.w, h: d.h, g, m });
@@ -479,33 +478,47 @@ export default function App() {
     const isSingle = viewMode === 'split';
 
     if (!d.moved) {
-      let tapSide: 'left' | 'right';
+      // [단순 탭 동작]
+      // 만화(rtl): 좌측 탭 = 다음 페이지(+1), 우측 탭 = 이전 페이지(-1)
+      // 일반(ltr): 우측 탭 = 다음 페이지(+1), 좌측 탭 = 이전 페이지(-1)
       let delta: number;
-
       if (isSingle) {
-        tapSide = d.cx < d.w / 2 ? 'left' : 'right';
-        delta = readingDirection === 'rtl' ? (tapSide === 'left' ? 1 : -1) : (tapSide === 'right' ? 1 : -1);
+        const isLeftTap = d.cx < d.w / 2;
+        delta = readingDirection === 'rtl' ? (isLeftTap ? 1 : -1) : (isLeftTap ? -1 : 1);
       } else {
-        tapSide = d.cx < d.w ? 'left' : 'right';
-        delta = readingDirection === 'rtl' ? (tapSide === 'left' ? 1 : -1) : (tapSide === 'right' ? 1 : -1);
+        const isLeftTap = d.cx < d.w;
+        delta = readingDirection === 'rtl' ? (isLeftTap ? 1 : -1) : (isLeftTap ? -1 : 1);
       }
 
       const nextIdx = currentIndex + delta;
       if (nextIdx >= 0 && nextIdx < pages.length) {
-        const curlSide: 'left' | 'right' = tapSide;
+        const tapSide: 'left' | 'right' = delta > 0 ? 'right' : 'left';
         const g: Pt = { x: d.w, y: d.h / 2 };
-        const instantCurl: CurlState = { side: curlSide, nextIdx, w: d.w, h: d.h, g, m: g };
+        const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
         setCurl(instantCurl);
-        finishCurl(true, instantCurl);
+        finishCurl(instantCurl, true);
       }
       return;
     }
 
     if (!curl) return;
 
+    const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
-    const commit = progress > 0.22;
-    finishCurl(commit, curl);
+    // 제본선 방향 플릭 속도 (px/ms)
+    const towardSpine = curl.side === 'right' ? -d.vx : d.vx;
+
+    // [자연스러운 판정]: 살짝만 튕겨도(flick) 넘어가고, 10% 이상만 당겨도 시원하게 넘어감!
+    let complete: boolean;
+    if (towardSpine > 0.18) {
+      complete = true;
+    } else if (towardSpine < -0.25) {
+      complete = false;
+    } else {
+      complete = progress > 0.10 || Math.abs(dxClient) > d.w * 0.18;
+    }
+
+    finishCurl(curl, complete);
   };
 
   const nextSpread = curl ? pages[curl.nextIdx] : null;
@@ -621,8 +634,8 @@ export default function App() {
               height: chassisH,
             }}
             className={
-              "book-chassis cursor-grab active:cursor-grabbing relative overflow-hidden select-none touch-none " +
-              (immersive ? "book-chassis-bare" : "rounded-[10px] shadow-2xl")
+              'book-chassis cursor-grab active:cursor-grabbing relative overflow-hidden select-none touch-none ' +
+              (immersive ? 'book-chassis-bare' : 'rounded-[10px] shadow-2xl')
             }
             onPointerDown={handleCurlDown}
             onPointerMove={handleCurlMove}
@@ -744,7 +757,7 @@ export default function App() {
               className="w-full accent-neutral-300 h-1 bg-neutral-700 rounded-lg cursor-pointer"
             />
             <span className="text-xs text-neutral-400 font-mono whitespace-nowrap min-w-[50px] text-right">
-              {currentIndex + 1} / {pages.length}
+              {String(currentIndex + 1) + ' / ' + String(pages.length)}
             </span>
           </div>
 
@@ -752,8 +765,8 @@ export default function App() {
             <button
               onClick={() => setCreaseEnabled((v) => !v)}
               className={
-                "px-2 py-1 rounded text-xs transition-colors " +
-                (creaseEnabled ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200")
+                'px-2 py-1 rounded text-xs transition-colors ' +
+                (creaseEnabled ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200')
               }
               title="중앙 제본선 음영 토글"
             >
@@ -786,10 +799,10 @@ export default function App() {
                     setShowDrawer(false);
                   }}
                   className={
-                    "w-full text-left px-3 py-2 rounded-lg text-xs truncate transition-colors " +
+                    'w-full text-left px-3 py-2 rounded-lg text-xs truncate transition-colors ' +
                     (name === currentArchiveName
-                      ? "bg-neutral-800 text-neutral-100 font-medium"
-                      : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200")
+                      ? 'bg-neutral-800 text-neutral-100 font-medium'
+                      : 'text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200')
                   }
                 >
                   {name}
