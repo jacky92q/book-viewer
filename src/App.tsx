@@ -910,7 +910,7 @@ export default function App() {
             {/* 3D 책장 넘김 레이어 */}
             {curl && nextSpread && currentSpread && (
               <PageCurl
-                side={isSinglePage ? 'left' : curl.side}
+                side={curl.side}
                 w={curl.w}
                 h={curl.h}
                 g={curl.g}
