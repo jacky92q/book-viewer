@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import * as fflate from 'fflate';
-import PageCurl from './PageCurl';
+import PageCurl from './PageCurlComponent';
 import { clampCurlPoint, curlProgress, type Pt } from './pageCurl';
 import {
   supportsDirPicker,
