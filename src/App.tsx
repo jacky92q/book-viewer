@@ -449,16 +449,15 @@ export default function App() {
 
     if (!d.moved) return;
 
-    // [중요: 드래그 시작 시 side를 1회 고정하여 애니메이션이 깜빡거리며 튀는 것을 방지]
+    // [정확한 일본만화 진행 방향]:
+    // 좌에서 우로 쓸기 (dxClient > 0) -> [다음 페이지(+1)] 좌측 페이지 컬 (side = 'left')
+    // 우에서 좌로 쓸기 (dxClient < 0) -> [이전 페이지(-1)] 우측 페이지 컬 (side = 'right')
     if (!d.lockedSide) {
-      // 우에서 좌로 쓸기 (dxClient < 0) -> [다음 페이지] 우측 페이지 컬 (side = 'right')
-      // 좌에서 우로 쓸기 (dxClient > 0) -> [이전 페이지] 좌측 페이지 컬 (side = 'left')
-      d.lockedSide = dxClient < 0 ? 'right' : 'left';
+      d.lockedSide = dxClient > 0 ? 'left' : 'right';
     }
 
     const side = d.lockedSide;
-    // 만화 기준: 우->좌 쓸기(dx < 0) = 다음 페이지(+1), 좌->우 쓸기(dx > 0) = 이전 페이지(-1)
-    const delta = side === 'right' ? 1 : -1;
+    const delta = side === 'left' ? 1 : -1;
     const nextIdx = currentIndex + delta;
 
     if (nextIdx < 0 || nextIdx >= pages.length) return;
@@ -466,8 +465,8 @@ export default function App() {
     const g: Pt = { x: d.w, y: d.gy };
 
     // 로컬 좌표계:
-    // side === 'right': x=d.w가 우측 모서리, x=0이 중앙 제본선. dxClient < 0 일 때 m.x 감소
-    // side === 'left': x=d.w가 좌측 모서리, x=0이 중앙 제본선(미러링). dxClient > 0 일 때 m.x 감소
+    // side === 'left': 좌에서 우로 끌 때(dxClient > 0), m.x = d.w - dxLocal < d.w (제본선 방향으로 이동)
+    // side === 'right': 우에서 좌로 끌 때(dxClient < 0), m.x = d.w + dxLocal < d.w (제본선 방향으로 이동)
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
@@ -485,21 +484,15 @@ export default function App() {
     const isSingle = viewMode === 'split';
 
     if (!d.moved) {
-      // [단순 탭 동작]
-      // 만화(rtl): 좌측 탭 = 다음 페이지(+1), 우측 탭 = 이전 페이지(-1)
-      // 일반(ltr): 우측 탭 = 다음 페이지(+1), 좌측 탭 = 이전 페이지(-1)
-      let delta: number;
-      if (isSingle) {
-        const isLeftTap = d.cx < d.w / 2;
-        delta = readingDirection === 'rtl' ? (isLeftTap ? 1 : -1) : (isLeftTap ? -1 : 1);
-      } else {
-        const isLeftTap = d.cx < d.w;
-        delta = readingDirection === 'rtl' ? (isLeftTap ? 1 : -1) : (isLeftTap ? -1 : 1);
-      }
+      // [단순 탭 동작]:
+      // 우측 탭 = 다음 페이지 (+1, 좌측 페이지 넘김)
+      // 좌측 탭 = 이전 페이지 (-1, 우측 페이지 넘김)
+      const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
+      const delta = isRightTap ? 1 : -1;
 
       const nextIdx = currentIndex + delta;
       if (nextIdx >= 0 && nextIdx < pages.length) {
-        const tapSide: 'left' | 'right' = delta > 0 ? 'right' : 'left';
+        const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
         const g: Pt = { x: d.w, y: d.h / 2 };
         const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
         setCurl(instantCurl);
@@ -512,17 +505,20 @@ export default function App() {
 
     const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
-    // 제본선 방향 속도 (px/ms)
-    const towardSpine = curl.side === 'right' ? -d.vx : d.vx;
+
+    // 제본선 방향 플릭 속도 (px/ms)
+    // side === 'left': dxClient > 0 (오른쪽 드래그) 시 vx > 0이 제본선 방향
+    // side === 'right': dxClient < 0 (왼쪽 드래그) 시 -vx > 0이 제본선 방향
+    const towardSpine = curl.side === 'left' ? d.vx : -d.vx;
 
     // 가볍게 튕기기만 해도 시원하게 넘어가도록 판정 완화
     let complete: boolean;
-    if (towardSpine > 0.22) {
+    if (towardSpine > 0.18) {
       complete = true;
-    } else if (towardSpine < -0.25) {
+    } else if (towardSpine < -0.20) {
       complete = false;
     } else {
-      complete = progress > 0.10 || Math.abs(dxClient) > d.w * 0.18;
+      complete = progress > 0.10 || Math.abs(dxClient) > d.w * 0.15;
     }
 
     finishCurl(curl, complete);
@@ -701,16 +697,16 @@ export default function App() {
                   front={getSliceStyle(
                     isSinglePage
                       ? currentSpread.left
-                      : curl.side === 'right'
-                      ? currentSpread.right
-                      : currentSpread.left
+                      : curl.side === 'left'
+                      ? currentSpread.left
+                      : currentSpread.right
                   )}
                   back={getSliceStyle(
                     isSinglePage
                       ? nextSpread.left
-                      : curl.side === 'right'
-                      ? nextSpread.left
-                      : nextSpread.right
+                      : curl.side === 'left'
+                      ? nextSpread.right
+                      : nextSpread.left
                   )}
                 />
               </div>
