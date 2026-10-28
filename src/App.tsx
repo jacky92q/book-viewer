@@ -1,7 +1,5 @@
 
-import os
-
-app_code = '''import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Columns,
   BookOpen,
@@ -1044,8 +1042,3 @@ export default function App() {
     </div>
   );
 }
-
-out_path = '/working_dir/c_a52c8d8788364d19/artifacts/file_generation/ttl=63d/output/App.tsx'
-with open(out_path, 'w', encoding='utf-8') as f:
-    f.write(app_code.strip())
-print("Saved App.tsx with IndexedDB file persistence.")
