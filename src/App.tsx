@@ -62,6 +62,7 @@ interface DragState {
   cy: number;
   gy: number;
   moved: boolean;
+  lockedSide: 'left' | 'right' | null;
 }
 
 interface CurlState {
@@ -360,7 +361,7 @@ export default function App() {
       const targetX = complete ? -c.w : c.g.x;
       const targetY = c.g.y;
       const startTime = performance.now();
-      const duration = 220;
+      const duration = 200;
 
       const animate = (now: number) => {
         const elapsed = now - startTime;
@@ -422,6 +423,7 @@ export default function App() {
       cy,
       gy,
       moved: false,
+      lockedSide: null,
     };
 
     chassis.setPointerCapture(e.pointerId);
@@ -447,20 +449,25 @@ export default function App() {
 
     if (!d.moved) return;
 
-    // 스와이프 방향:
-    // dxClient < 0 (우에서 좌로 쓸기) -> 다음 페이지 (delta = +1), 우측 페이지 컬 (side = 'right')
-    // dxClient > 0 (좌에서 우로 쓸기) -> 이전 페이지 (delta = -1), 좌측 페이지 컬 (side = 'left')
-    const side: 'left' | 'right' = dxClient < 0 ? 'right' : 'left';
-    const delta = dxClient < 0 ? 1 : -1;
+    // [중요: 드래그 시작 시 side를 1회 고정하여 애니메이션이 깜빡거리며 튀는 것을 방지]
+    if (!d.lockedSide) {
+      // 우에서 좌로 쓸기 (dxClient < 0) -> [다음 페이지] 우측 페이지 컬 (side = 'right')
+      // 좌에서 우로 쓸기 (dxClient > 0) -> [이전 페이지] 좌측 페이지 컬 (side = 'left')
+      d.lockedSide = dxClient < 0 ? 'right' : 'left';
+    }
 
+    const side = d.lockedSide;
+    // 만화 기준: 우->좌 쓸기(dx < 0) = 다음 페이지(+1), 좌->우 쓸기(dx > 0) = 이전 페이지(-1)
+    const delta = side === 'right' ? 1 : -1;
     const nextIdx = currentIndex + delta;
+
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
     const g: Pt = { x: d.w, y: d.gy };
 
-    // 로컬 좌표:
-    // side === 'right': x=d.w가 바깥쪽 우측 모서리, x=0이 제본선(좌측). dxClient < 0 일 때 m.x 감소
-    // side === 'left': x=d.w가 바깥쪽 좌측 모서리, x=0이 제본선(우측). dxClient > 0 일 때 m.x 감소
+    // 로컬 좌표계:
+    // side === 'right': x=d.w가 우측 모서리, x=0이 중앙 제본선. dxClient < 0 일 때 m.x 감소
+    // side === 'left': x=d.w가 좌측 모서리, x=0이 중앙 제본선(미러링). dxClient > 0 일 때 m.x 감소
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
@@ -505,12 +512,12 @@ export default function App() {
 
     const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
-    // 제본선 방향 플릭 속도 (px/ms)
+    // 제본선 방향 속도 (px/ms)
     const towardSpine = curl.side === 'right' ? -d.vx : d.vx;
 
-    // [자연스러운 판정]: 살짝만 튕겨도(flick) 넘어가고, 10% 이상만 당겨도 시원하게 넘어감!
+    // 가볍게 튕기기만 해도 시원하게 넘어가도록 판정 완화
     let complete: boolean;
-    if (towardSpine > 0.18) {
+    if (towardSpine > 0.22) {
       complete = true;
     } else if (towardSpine < -0.25) {
       complete = false;
@@ -651,7 +658,7 @@ export default function App() {
                 />
               </div>
             ) : (
-              /* [양면 모드 - 복구된 좌/우 2페이지] */
+              /* [양면 모드 - 좌/우 2페이지] */
               <>
                 <div className="page-half left-0 rounded-l-[10px]">
                   <div
