@@ -435,7 +435,6 @@ export default function App() {
       side,
       nextIdx,
       moved: false,
-      lockedSide: side,
     };
 
     // [초기 프레임]: m을 g와 동일하게 초기화하여 누르는 순간 다음 장 이미지가 튀어나오는 현상을 완벽 방지!
