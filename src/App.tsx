@@ -496,8 +496,6 @@ export default function App() {
     }
   }, [pages.length, currentIndex]);
 
-  const currentSpread = pages[currentIndex] || null;
-  
 
   // --- 슬라이스 스타일 계산 헬퍼 ---
   const getSliceStyle = useCallback((desc?: HalfDescriptor): React.CSSProperties => {
