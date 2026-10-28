@@ -49,7 +49,7 @@ interface SpreadPage {
 }
 
 type ReadingDirection = 'rtl' | 'ltr';
-type ViewMode = 'spread' | 'split' | 'single' | 'pair';
+type ViewMode = 'spread' | 'split' | 'pair';
 type PageTurnSide = 'left' | 'right';
 
 type BookSource = 'single' | 'library' | 'queue';
@@ -117,7 +117,7 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [readingDirection, setReadingDirection] = useState<ReadingDirection>('rtl');
   const [viewMode, setViewMode] = useState<ViewMode>(() =>
-    window.innerHeight > window.innerWidth ? 'single' : 'spread'
+    window.innerHeight > window.innerWidth ? 'split' : 'spread'
   );
   const [pageTurnSide, setPageTurnSide] = useState<PageTurnSide>('right');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
@@ -261,7 +261,7 @@ export default function App() {
       void kvSet('progress', {
         name: cur.name,
         index: currentIndex,
-        viewMode: viewMode === 'split' ? 'single' : viewMode,
+        viewMode,
         readingDirection,
         pageTurnSide
       } satisfies SavedProgress);
@@ -280,15 +280,6 @@ export default function App() {
           title: f.name,
           left: { url: f.url, slice: 'left-half', label: `${idx + 1}L` },
           right: { url: f.url, slice: 'right-half', label: `${idx + 1}R` },
-          thumbUrl: f.url
-        });
-      });
-    } else if (viewMode === 'single') {
-      rawFiles.forEach((f, idx) => {
-        list.push({
-          title: f.name,
-          left: { url: f.url, slice: 'full', label: `${idx + 1}` },
-          right: { url: f.url, slice: 'full', label: `${idx + 1}` },
           thumbUrl: f.url
         });
       });
@@ -400,7 +391,7 @@ export default function App() {
       const saved = await kvGet<SavedProgress>('progress');
       let index = 0;
       if (saved && saved.name === archive.name) {
-        if (saved.viewMode) setViewMode(saved.viewMode === 'split' ? 'single' : saved.viewMode);
+        if (saved.viewMode) setViewMode(saved.viewMode);
         if (saved.readingDirection) setReadingDirection(saved.readingDirection);
         if (saved.pageTurnSide) setPageTurnSide(saved.pageTurnSide);
         index = Math.max(0, saved.index || 0);
@@ -635,7 +626,7 @@ export default function App() {
     (side: 'left' | 'right') => {
       const chassis = chassisRef.current;
       if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
-      const isSinglePage = viewMode === 'single';
+      const isSinglePage = viewMode === 'split';
       const delta = side === pageTurnSide ? 1 : -1;
       const nextIdx = currentIndex + delta;
       if (delta > 0 && nextIdx >= pages.length) {
@@ -668,13 +659,15 @@ export default function App() {
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
     const rect = chassis.getBoundingClientRect();
     const scale = rect.width / chassis.offsetWidth || 1;
-    const isSinglePage = viewMode === 'single';
+    const isSinglePage = viewMode === 'split';
     const w = isSinglePage ? chassis.offsetWidth : chassis.offsetWidth / 2;
     const h = chassis.offsetHeight;
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
-    const side: 'left' | 'right' = isSinglePage ? (pageTurnSide === 'left' ? 'left' : 'right') : cx < w ? 'left' : 'right';
+    const side: 'left' | 'right' = isSinglePage
+      ? (pageTurnSide === 'left' ? 'right' : 'left')
+      : cx < w ? 'left' : 'right';
     const delta = side === pageTurnSide ? 1 : -1;
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
@@ -774,7 +767,7 @@ export default function App() {
   const currentSpread = pages[currentIndex];
   const nextSpread = curl ? pages[curl.nextIdx] : undefined;
   const flipSide = curl?.side ?? null;
-  const singlePageMode = viewMode === 'single';
+  const singlePageMode = viewMode === 'split';
 
   // 책 크기: 이미지 비율을 유지하면서 가능한 영역을 최대한 채운다
   const bookAspect = imgSize
@@ -899,15 +892,11 @@ export default function App() {
             </button>
 
             <button
-              onClick={() =>
-                setViewMode((m) =>
-                  m === 'spread' ? 'single' : m === 'single' || m === 'split' ? 'pair' : 'spread'
-                )
-              }
+              onClick={() => setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))}
               className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-emerald-300 flex items-center gap-1"
             >
               <Columns className="w-4 h-4" />
-              <span>{viewMode === 'spread' ? '양면' : viewMode === 'single' || viewMode === 'split' ? '1장' : '2장'}</span>
+              <span>{viewMode === 'spread' ? '양면' : viewMode === 'split' ? '분할' : '2장'}</span>
             </button>
 
             <button
@@ -1127,36 +1116,6 @@ export default function App() {
         </div>
       )}
 
-      {/* 몰입 모드 오버레이: 잠깐 나타났다 사라지는 메뉴 + 얇은 진행바 */}
-      {immersive && (
-        <>
-          <div
-            className={`absolute top-0 inset-x-0 z-50 px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent transition-opacity duration-300 ${
-              hudVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-            }`}
-          >
-            <p className="text-xs text-slate-200 truncate">
-              {bookTitle} · {currentIndex + 1} / {pages.length}
-            </p>
-            <button
-              onClick={() => void toggleImmersive()}
-              className="px-3 py-1.5 rounded-lg bg-slate-900/80 border border-white/15 text-xs font-semibold flex items-center gap-1.5 shrink-0"
-            >
-              <Minimize2 className="w-4 h-4" />
-              <span>나가기 (Esc)</span>
-            </button>
-          </div>
-          <div className="absolute bottom-0 inset-x-0 h-[3px] bg-white/10 z-50 pointer-events-none">
-            <div
-              className="h-full bg-indigo-400/80 transition-all"
-              style={{
-                width: `${pages.length > 1 ? (currentIndex / (pages.length - 1)) * 100 : 0}%`,
-                marginLeft: readingDirection === 'rtl' ? 'auto' : undefined
-              }}
-            />
-          </div>
-        </>
-      )}
     </div>
   );
 }
