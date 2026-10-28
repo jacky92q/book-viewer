@@ -75,7 +75,7 @@ interface CurlState {
   m: Pt;
 }
 
-const IMAGE_EXT_REGEX = /\\.(jpe?g|png|webp|avif|gif)$/i;
+const IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|avif|gif)$/i;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 // --- IndexedDB 영구 저장 유틸리티 (앱 종료 후에도 책 파일 유지) ---
@@ -109,9 +109,7 @@ async function persistBookArchive(file: Blob, name: string) {
     store.put(file, 'current_archive_blob');
     store.put(name, 'current_archive_name');
     store.delete('current_images_list');
-    await new Promise((res) => {
-      tx.oncomplete = res;
-    });
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; tx.onabort = rej; });
   } catch (err) {
     console.warn('아카이브 IndexedDB 저장 실패:', err);
   }
@@ -125,9 +123,7 @@ async function persistImagesList(files: { name: string; blob: Blob }[], bookTitl
     store.put(files, 'current_images_list');
     store.put(bookTitle, 'current_archive_name');
     store.delete('current_archive_blob');
-    await new Promise((res) => {
-      tx.oncomplete = res;
-    });
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; tx.onabort = rej; });
   } catch (err) {
     console.warn('이미지 목록 IndexedDB 저장 실패:', err);
   }
@@ -410,13 +406,13 @@ export default function App() {
 
   // --- 다음 권 불러오기 로직 연결 ---
   const loadArchiveByIndex = useCallback(
-    async (nextArchiveName: string) => {
+    async (nextArchiveName: string, shouldPreservePage = false) => {
       if (!dirHandle) return;
       try {
         const file = await getArchiveFile(dirHandle, nextArchiveName);
-        await loadZipFile(file);
+        await loadZipFile(file, shouldPreservePage);
         setCurrentArchiveName(nextArchiveName);
-        setCurrentIndex(0);
+        if (!shouldPreservePage) setCurrentIndex(0);
       } catch (err) {
         console.error('다음 권 로드 실패:', err);
       }
@@ -437,7 +433,7 @@ export default function App() {
   // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
   const loadZipFile = async (file: File | Blob, shouldPreservePage = false) => {
     const fileName = 'name' in file ? file.name : (currentArchiveName || '단행본.zip');
-    setBookTitle(fileName.replace(/\\.(zip|cbz)$/i, ''));
+    setBookTitle(fileName.replace(/\.(zip|cbz)$/i, ''));
     
     // 영구 저장소(IndexedDB)에 활성 책 보관
     persistBookArchive(file, fileName);
@@ -567,7 +563,7 @@ export default function App() {
         setShowDrawer(true);
         const lastArch = localStorage.getItem('foldbook_last_archive');
         const target = lastArch && list.includes(lastArch) ? lastArch : list[0];
-        loadArchiveByIndex(target);
+        loadArchiveByIndex(target, target === lastArch);
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
@@ -774,11 +770,12 @@ export default function App() {
                 onChange={(e) => {
                   const files = e.target.files;
                   if (!files || files.length === 0) return;
-                  if (files.length === 1 && /\\.(zip|cbz)$/i.test(files[0].name)) {
+                  if (files.length === 1 && /\.(zip|cbz)$/i.test(files[0].name)) {
                     loadZipFile(files[0]);
                   } else {
                     handleMultipleImageFiles(files);
                   }
+                  e.target.value = '';
                 }}
               />
             </label>
