@@ -624,12 +624,20 @@ export default function App() {
     [animateCurl, playPageSound]
   );
 
+  const getPageTurnDelta = useCallback(
+    (side: 'left' | 'right') => {
+      const towardNext = readingDirection === 'rtl' ? side === 'left' : side === 'right';
+      return towardNext ? 1 : -1;
+    },
+    [readingDirection]
+  );
+
   const triggerSideTurn = useCallback(
     (side: 'left' | 'right') => {
       const chassis = chassisRef.current;
       if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
       const isSinglePage = viewMode === 'split';
-      const delta = side === pageTurnSide ? 1 : -1;
+      const delta = getPageTurnDelta(side);
       const nextIdx = currentIndex + delta;
       if (delta > 0 && nextIdx >= pages.length) {
         goNextBookRef.current();
@@ -667,10 +675,8 @@ export default function App() {
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
-    const side: 'left' | 'right' = isSinglePage
-      ? (pageTurnSide === 'left' ? 'right' : 'left')
-      : cx <= w ? 'left' : 'right';
-    const delta = side === 'left' ? 1 : -1;
+    const side: 'left' | 'right' = isSinglePage ? 'left' : cx <= w ? 'left' : 'right';
+    const delta = getPageTurnDelta(side);
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
       // 마지막 페이지: 손을 뗄 때(사용자 동작 중) 다음 권을 불러온다
@@ -719,7 +725,11 @@ export default function App() {
     d.lastT = now;
 
     const dragMotion: 'left' | 'right' = e.clientX - d.startX > 0 ? 'left' : 'right';
-    if (Math.abs(e.clientX - d.startX) > 12) d.side = dragMotion;
+    if (Math.abs(e.clientX - d.startX) > 12) {
+      d.side = dragMotion;
+      const rawNextIdx = currentIndex + getPageTurnDelta(d.side);
+      d.nextIdx = Math.max(0, Math.min(pages.length - 1, rawNextIdx));
+    }
 
     const dxLocal = (d.side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
