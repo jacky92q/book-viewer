@@ -193,33 +193,10 @@ export default function App() {
     hudTimerRef.current = window.setTimeout(() => setHudVisible(false), 2500);
   }, []);
 
-  const toggleImmersive = useCallback(async () => {
-    if (!immersive) {
-      setImmersive(true);
-      showHud();
-      try {
-        await document.documentElement.requestFullscreen?.();
-      } catch {
-        // 전체화면 API를 못 쓰는 브라우저(iOS 등)에서는 UI만 숨긴 몰입 모드로 동작
-      }
-    } else {
-      setImmersive(false);
-      try {
-        if (document.fullscreenElement) await document.exitFullscreen();
-      } catch {
-        // ignore
-      }
-    }
-  }, [immersive, showHud]);
-
-  // Esc 등으로 브라우저 전체화면이 풀리면 몰입 모드도 같이 종료
-  useEffect(() => {
-    const onFsChange = () => {
-      if (!document.fullscreenElement) setImmersive(false);
-    };
-    document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
-  }, []);
+  const toggleImmersive = useCallback(() => {
+    setImmersive((prev) => !prev);
+    showHud();
+  }, [showHud]);
 
   // 몰입 모드에서 마우스를 움직이거나 위쪽을 터치하면 잠깐 메뉴를 보여준다
   useEffect(() => {
@@ -278,8 +255,8 @@ export default function App() {
       rawFiles.forEach((f, idx) => {
         list.push({
           title: f.name,
-          left: { url: f.url, slice: 'left-half', label: `${idx + 1}L` },
-          right: { url: f.url, slice: 'right-half', label: `${idx + 1}R` },
+          left: { url: f.url, slice: 'full', label: `${idx + 1}` },
+          right: { url: f.url, slice: 'full', label: `${idx + 1}` },
           thumbUrl: f.url
         });
       });
@@ -632,6 +609,20 @@ export default function App() {
     [readingDirection]
   );
 
+  const resolveGestureSide = useCallback(
+    (dragDeltaX: number) => {
+      const dragToRight = dragDeltaX > 0;
+      return readingDirection === 'rtl'
+        ? dragToRight
+          ? 'left'
+          : 'right'
+        : dragToRight
+          ? 'right'
+          : 'left';
+    },
+    [readingDirection]
+  );
+
   const triggerSideTurn = useCallback(
     (side: 'left' | 'right') => {
       const chassis = chassisRef.current;
@@ -675,18 +666,16 @@ export default function App() {
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
-    const side: 'left' | 'right' = isSinglePage ? 'left' : cx <= w ? 'left' : 'right';
+    const side = resolveGestureSide(e.clientX - rect.left - (isSinglePage ? rect.width / 2 : w));
     const delta = getPageTurnDelta(side);
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
-      // 마지막 페이지: 손을 뗄 때(사용자 동작 중) 다음 권을 불러온다
       endIntentRef.current = e.pointerId;
       chassis.setPointerCapture(e.pointerId);
       return;
     }
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
-    // 잡은 높이를 가까운 위/아래 모서리 쪽으로 끌어당겨 모서리부터 말려 올라오는 느낌을 준다
     const edgeY = cy < h / 2 ? 0 : h;
     const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
     const g: Pt = { x: w, y: gy };
@@ -724,7 +713,8 @@ export default function App() {
     d.lastX = e.clientX;
     d.lastT = now;
 
-    const dragMotion: 'left' | 'right' = e.clientX - d.startX > 0 ? 'left' : 'right';
+    const dragToRight = e.clientX - d.startX > 0;
+    const dragMotion = resolveGestureSide(e.clientX - d.startX);
     if (Math.abs(e.clientX - d.startX) > 12) {
       d.side = dragMotion;
       const rawNextIdx = currentIndex + getPageTurnDelta(d.side);
@@ -782,6 +772,7 @@ export default function App() {
   const nextSpread = curl ? pages[curl.nextIdx] : undefined;
   const flipSide = curl?.side ?? null;
   const singlePageMode = viewMode === 'split';
+  const fullSpreadMode = viewMode === 'spread';
 
   // 책 크기: 이미지 비율을 유지하면서 가능한 영역을 최대한 채운다
   const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.5;
@@ -1002,7 +993,11 @@ export default function App() {
               {/* Base Left Page */}
               <div
                 className={`page-half left-0 ${pageRadius}`}
-                style={singlePageMode ? { width: '100%', borderRadius: immersive ? 0 : '10px' } : undefined}
+                style={
+                  singlePageMode || fullSpreadMode
+                    ? { width: '100%', borderRadius: immersive ? 0 : '10px' }
+                    : undefined
+                }
               >
                 <div
                   className="w-full h-full bg-no-repeat"
@@ -1012,7 +1007,7 @@ export default function App() {
                 />
               </div>
 
-              {!singlePageMode && (
+              {!singlePageMode && !fullSpreadMode && (
                 <div className={`page-half right-0 ${immersive ? '' : 'rounded-r-[10px]'}`}>
                   <div
                     className="w-full h-full bg-no-repeat"
@@ -1038,7 +1033,7 @@ export default function App() {
                 />
               )}
 
-              {creaseEnabled && <div className="center-crease" />}
+              {creaseEnabled && !fullSpreadMode && <div className="center-crease" />}
             </div>
           </>
         )}
