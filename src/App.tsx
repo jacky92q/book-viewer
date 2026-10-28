@@ -909,28 +909,46 @@ export default function App() {
 
             {/* 3D 책장 넘김 레이어 */}
             {curl && nextSpread && currentSpread && (
-              <PageCurl
-                side={curl.side}
-                w={curl.w}
-                h={curl.h}
-                g={curl.g}
-                m={curl.m}
-                rounded={!immersive}
-                front={getSliceStyle(
-                  isSinglePage
-                    ? currentSpread.left
-                    : curl.side === 'right'
-                    ? currentSpread.right
-                    : currentSpread.left
-                )}
-                back={getSliceStyle(
-                  isSinglePage
-                    ? nextSpread.left
-                    : curl.side === 'right'
-                    ? nextSpread.left
-                    : nextSpread.right
-                )}
-              />
+              <div
+                className="pointer-events-none z-20"
+                style={
+                  isSinglePage && curl.side === 'right'
+                    ? {
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '200%',
+                        height: '100%',
+                      }
+                    : {
+                        position: 'absolute',
+                        inset: 0,
+                      }
+                }
+              >
+                <PageCurl
+                  side={curl.side}
+                  w={curl.w}
+                  h={curl.h}
+                  g={curl.g}
+                  m={curl.m}
+                  rounded={!immersive}
+                  front={getSliceStyle(
+                    isSinglePage
+                      ? currentSpread.left
+                      : curl.side === 'right'
+                      ? currentSpread.right
+                      : currentSpread.left
+                  )}
+                  back={getSliceStyle(
+                    isSinglePage
+                      ? nextSpread.left
+                      : curl.side === 'right'
+                      ? nextSpread.left
+                      : nextSpread.right
+                  )}
+                />
+              </div>
             )}
 
             {/* 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
