@@ -116,7 +116,9 @@ export default function App() {
   const [bookTitle, setBookTitle] = useState<string>('폴더나 사진 파일들을 불러오세요');
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [readingDirection, setReadingDirection] = useState<ReadingDirection>('rtl');
-  const [viewMode, setViewMode] = useState<ViewMode>('spread');
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    window.innerHeight > window.innerWidth ? 'single' : 'spread'
+  );
   const [pageTurnSide, setPageTurnSide] = useState<PageTurnSide>('right');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(false);
@@ -281,7 +283,16 @@ export default function App() {
           thumbUrl: f.url
         });
       });
-    } else if (viewMode === 'single' || viewMode === 'split') {
+    } else if (viewMode === 'single') {
+      rawFiles.forEach((f, idx) => {
+        list.push({
+          title: f.name,
+          left: { url: f.url, slice: 'full', label: `${idx + 1}` },
+          right: { url: f.url, slice: 'full', label: `${idx + 1}` },
+          thumbUrl: f.url
+        });
+      });
+    } else if (viewMode === 'split') {
       rawFiles.forEach((f, idx) => {
         const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
         const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
@@ -624,8 +635,8 @@ export default function App() {
     (side: 'left' | 'right') => {
       const chassis = chassisRef.current;
       if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
-      const delta =
-        readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
+      const isSinglePage = viewMode === 'single';
+      const delta = side === pageTurnSide ? 1 : -1;
       const nextIdx = currentIndex + delta;
       if (delta > 0 && nextIdx >= pages.length) {
         goNextBookRef.current();
@@ -633,7 +644,7 @@ export default function App() {
       }
       if (nextIdx < 0 || nextIdx >= pages.length) return;
 
-      const w = chassis.offsetWidth / 2;
+      const w = isSinglePage ? chassis.offsetWidth : chassis.offsetWidth / 2;
       const h = chassis.offsetHeight;
       const g: Pt = { x: w, y: h };
       const base = { side, nextIdx, w, h, g };
@@ -649,7 +660,7 @@ export default function App() {
         }
       );
     },
-    [curl, pages.length, readingDirection, currentIndex, animateCurl, playPageSound]
+    [curl, pages.length, pageTurnSide, currentIndex, viewMode, animateCurl, playPageSound]
   );
 
   const handleCurlDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -657,12 +668,13 @@ export default function App() {
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
     const rect = chassis.getBoundingClientRect();
     const scale = rect.width / chassis.offsetWidth || 1;
-    const w = chassis.offsetWidth / 2;
+    const isSinglePage = viewMode === 'single';
+    const w = isSinglePage ? chassis.offsetWidth : chassis.offsetWidth / 2;
     const h = chassis.offsetHeight;
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
-    const side: 'left' | 'right' = cx < w ? 'left' : 'right';
+    const side: 'left' | 'right' = isSinglePage ? (pageTurnSide === 'left' ? 'left' : 'right') : cx < w ? 'left' : 'right';
     const delta = side === pageTurnSide ? 1 : -1;
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
@@ -762,6 +774,7 @@ export default function App() {
   const currentSpread = pages[currentIndex];
   const nextSpread = curl ? pages[curl.nextIdx] : undefined;
   const flipSide = curl?.side ?? null;
+  const singlePageMode = viewMode === 'single';
 
   // 책 크기: 이미지 비율을 유지하면서 가능한 영역을 최대한 채운다
   const bookAspect = imgSize
@@ -781,151 +794,151 @@ export default function App() {
     <div className="h-dvh w-screen flex flex-col bg-[#0b0d13] text-slate-100 relative">
       {/* Header */}
       {!immersive && (
-      <header className="h-14 px-4 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shrink-0">
-            <BookOpen className="w-5 h-5 text-white" />
+      <header className="px-3 py-2.5 bg-slate-900/90 border-b border-slate-800 shrink-0">
+        <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shrink-0">
+              <BookOpen className="w-5 h-5 text-white" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="font-bold text-sm sm:text-base truncate">{bookTitle}</h1>
+              <p className="text-[11px] text-slate-400 truncate">
+                {notice ||
+                  (pages.length > 0
+                    ? `${currentIndex + 1} / ${pages.length} 페이지 · ${currentSpread?.title}`
+                    : '압축파일(zip/cbz)·폴더·사진 파일을 선택하거나 드래그 앤 드롭하세요')}
+              </p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h1 className="font-bold text-sm sm:text-base truncate">{bookTitle}</h1>
-            <p className="text-[11px] text-slate-400 truncate">
-              {notice ||
-                (pages.length > 0
-                  ? `${currentIndex + 1} / ${pages.length} 페이지 · ${currentSpread?.title}`
-                  : '압축파일(zip/cbz)·폴더·사진 파일을 선택하거나 드래그 앤 드롭하세요')}
-            </p>
-          </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          <input
-            ref={folderInputRef}
-            type="file"
-            webkitdirectory=""
-            directory=""
-            multiple
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
-          />
-          <input
-            ref={archiveInputRef}
-            type="file"
-            multiple
-            accept=".zip,.cbz,.alz,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip"
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) handleLoadFiles(e.target.files);
-              e.target.value = '';
-            }}
-          />
-          <input
-            ref={filesInputRef}
-            type="file"
-            multiple
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
-          />
-
-          <button
-            onClick={() => void openLibraryFolder()}
-            title="책 폴더를 연결하면 마지막 페이지에서 다음 권이 자동으로 열려요"
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center gap-1.5"
-          >
-            <Library className="w-4 h-4 text-amber-300" />
-            <span className="hidden md:inline">책 폴더</span>
-          </button>
-
-          {libraryNames.length > 0 && (
-            <button
-              onClick={() => setLibraryOpen(true)}
-              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium"
-            >
-              목록
-            </button>
-          )}
-
-          <button
-            onClick={() => archiveInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold flex items-center gap-1.5"
-          >
-            <FileArchive className="w-4 h-4" />
-            <span>압축파일 열기</span>
-          </button>
-
-          <button
-            onClick={() => folderInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center gap-1.5"
-          >
-            <FolderOpen className="w-4 h-4" />
-            <span className="hidden md:inline">폴더 열기</span>
-          </button>
-
-          <button
-            onClick={() => filesInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center gap-1.5"
-          >
-            <Images className="w-4 h-4 text-indigo-400" />
-            <span className="hidden sm:inline">사진 여러 장 선택</span>
-          </button>
-
-          <button
-            onClick={() => setReadingDirection((d) => (d === 'rtl' ? 'ltr' : 'rtl'))}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-amber-300"
-          >
-            {readingDirection === 'rtl' ? '⬅️ 만화책 (우→좌)' : '➡️ 일반책 (좌→우)'}
-          </button>
-
-          <button
-            onClick={() => setPageTurnSide((s) => (s === 'left' ? 'right' : 'left'))}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-cyan-300"
-          >
-            {pageTurnSide === 'left' ? '↩️ 좌측 넘김' : '↪️ 우측 넘김'}
-          </button>
-
-          <button
-            onClick={() =>
-              setViewMode((m) =>
-                m === 'spread' ? 'single' : m === 'single' || m === 'split' ? 'pair' : 'spread'
-              )
-            }
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-emerald-300 flex items-center gap-1"
-          >
-            <Columns className="w-4 h-4" />
-            <span className="hidden md:inline">
-              {viewMode === 'spread' ? '양면 폴드북' : viewMode === 'single' || viewMode === 'split' ? '1장씩 보기' : '2장 합치기'}
-            </span>
-          </button>
-
-          <button
-            onClick={() => void toggleImmersive()}
-            title="꽉 찬 화면 (F)"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold flex items-center gap-1"
-          >
-            <Maximize2 className="w-4 h-4 text-sky-300" />
-            <span className="hidden lg:inline">꽉 찬 화면</span>
-          </button>
-
-          <button
-            onClick={() => setSoundEnabled((s) => !s)}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700"
-          >
-            {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-          </button>
-
-          {deferredPrompt && (
-            <button
-              onClick={async () => {
-                await deferredPrompt.prompt();
-                setDeferredPrompt(null);
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <input
+              ref={folderInputRef}
+              type="file"
+              webkitdirectory=""
+              directory=""
+              multiple
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
+            />
+            <input
+              ref={archiveInputRef}
+              type="file"
+              multiple
+              accept=".zip,.cbz,.alz,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) handleLoadFiles(e.target.files);
+                e.target.value = '';
               }}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1"
+            />
+            <input
+              ref={filesInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => e.target.files && handleLoadFiles(e.target.files)}
+            />
+
+            <button
+              onClick={() => void openLibraryFolder()}
+              title="책 폴더를 연결하면 마지막 페이지에서 다음 권이 자동으로 열려요"
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-medium flex items-center gap-1.5"
             >
-              <Download className="w-4 h-4" />
-              <span>앱 설치</span>
+              <Library className="w-4 h-4 text-amber-300" />
+              <span className="hidden sm:inline">책 폴더</span>
             </button>
-          )}
+
+            {libraryNames.length > 0 && (
+              <button
+                onClick={() => setLibraryOpen(true)}
+                className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-medium"
+              >
+                목록
+              </button>
+            )}
+
+            <button
+              onClick={() => archiveInputRef.current?.click()}
+              className="h-9 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[10px] sm:text-xs font-semibold flex items-center gap-1.5"
+            >
+              <FileArchive className="w-4 h-4" />
+              <span className="hidden sm:inline">열기</span>
+            </button>
+
+            <button
+              onClick={() => folderInputRef.current?.click()}
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-medium flex items-center gap-1.5"
+            >
+              <FolderOpen className="w-4 h-4" />
+              <span className="hidden sm:inline">폴더</span>
+            </button>
+
+            <button
+              onClick={() => filesInputRef.current?.click()}
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-medium flex items-center gap-1.5"
+            >
+              <Images className="w-4 h-4 text-indigo-400" />
+              <span className="hidden sm:inline">사진</span>
+            </button>
+
+            <button
+              onClick={() => setReadingDirection((d) => (d === 'rtl' ? 'ltr' : 'rtl'))}
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-amber-300"
+            >
+              {readingDirection === 'rtl' ? '만화책' : '일반책'}
+            </button>
+
+            <button
+              onClick={() => setPageTurnSide((s) => (s === 'left' ? 'right' : 'left'))}
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-cyan-300"
+            >
+              {pageTurnSide === 'left' ? '좌 넘김' : '우 넘김'}
+            </button>
+
+            <button
+              onClick={() =>
+                setViewMode((m) =>
+                  m === 'spread' ? 'single' : m === 'single' || m === 'split' ? 'pair' : 'spread'
+                )
+              }
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-emerald-300 flex items-center gap-1"
+            >
+              <Columns className="w-4 h-4" />
+              <span>{viewMode === 'spread' ? '양면' : viewMode === 'single' || viewMode === 'split' ? '1장' : '2장'}</span>
+            </button>
+
+            <button
+              onClick={() => void toggleImmersive()}
+              title="꽉 찬 화면 (F)"
+              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold flex items-center gap-1"
+            >
+              <Maximize2 className="w-4 h-4 text-sky-300" />
+              <span className="hidden sm:inline">전체</span>
+            </button>
+
+            <button
+              onClick={() => setSoundEnabled((s) => !s)}
+              className="h-9 w-9 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 flex items-center justify-center"
+            >
+              {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            </button>
+
+            {deferredPrompt && (
+              <button
+                onClick={async () => {
+                  await deferredPrompt.prompt();
+                  setDeferredPrompt(null);
+                }}
+                className="h-9 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] sm:text-xs font-semibold flex items-center gap-1"
+              >
+                <Download className="w-4 h-4" />
+                <span className="hidden sm:inline">앱 설치</span>
+              </button>
+            )}
+          </div>
         </div>
       </header>
       )}
@@ -990,7 +1003,10 @@ export default function App() {
               onPointerCancel={handleCurlCancel}
             >
               {/* Base Left Page */}
-              <div className={`page-half left-0 ${pageRadius}`}>
+              <div
+                className={`page-half left-0 ${pageRadius}`}
+                style={singlePageMode ? { width: '100%', borderRadius: immersive ? 0 : '10px' } : undefined}
+              >
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(
@@ -999,15 +1015,16 @@ export default function App() {
                 />
               </div>
 
-              {/* Base Right Page */}
-              <div className={`page-half right-0 ${immersive ? '' : 'rounded-r-[10px]'}`}>
-                <div
-                  className="w-full h-full bg-no-repeat"
-                  style={getSliceStyle(
-                    flipSide === 'right' && nextSpread ? nextSpread.right : currentSpread?.right
-                  )}
-                />
-              </div>
+              {!singlePageMode && (
+                <div className={`page-half right-0 ${immersive ? '' : 'rounded-r-[10px]'}`}>
+                  <div
+                    className="w-full h-full bg-no-repeat"
+                    style={getSliceStyle(
+                      flipSide === 'right' && nextSpread ? nextSpread.right : currentSpread?.right
+                    )}
+                  />
+                </div>
+              )}
 
               {/* 포인터를 따라 접히는 페이지 */}
               {curl && nextSpread && currentSpread && (
@@ -1018,6 +1035,7 @@ export default function App() {
                   g={curl.g}
                   m={curl.m}
                   rounded={!immersive}
+                  fullPage={singlePageMode}
                   front={getSliceStyle(curl.side === 'right' ? currentSpread.right : currentSpread.left)}
                   back={getSliceStyle(curl.side === 'right' ? nextSpread.left : nextSpread.right)}
                 />

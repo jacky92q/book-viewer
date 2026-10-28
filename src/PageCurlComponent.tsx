@@ -12,6 +12,7 @@ interface PageCurlProps {
   /** 넘어간 뒤 보이는 뒷면 이미지 스타일 */
   back: React.CSSProperties;
   rounded?: boolean;
+  fullPage?: boolean;
 }
 
 const PAPER = '#f8f8f5';
@@ -22,8 +23,8 @@ const REVEAL_SHADE_LEN = 110;
  * 포인터를 따라 접히는 페이지.
  * 한쪽 페이지 크기(w x h)의 영역에 그리며, 왼쪽 페이지는 좌우를 뒤집은 좌표계로 계산한다.
  */
-export default function PageCurl({ side, w, h, g, m, front, back, rounded = true }: PageCurlProps) {
-  const mirrored = side === 'left';
+export default function PageCurl({ side, w, h, g, m, front, back, rounded = true, fullPage = false }: PageCurlProps) {
+  const mirrored = side === 'left' && !fullPage;
   const geo = computeCurl(g, m, w, h);
 
   const fill: React.CSSProperties = { position: 'absolute', inset: 0 };
@@ -32,7 +33,7 @@ export default function PageCurl({ side, w, h, g, m, front, back, rounded = true
       style={{
         ...fill,
         backgroundColor: PAPER,
-        borderRadius: !rounded ? 0 : mirrored ? '10px 0 0 10px' : '0 10px 10px 0',
+        borderRadius: !rounded ? 0 : fullPage ? '10px' : mirrored ? '10px 0 0 10px' : '0 10px 10px 0',
         transform: mirrored ? 'scaleX(-1)' : undefined
       }}
     >
@@ -62,7 +63,7 @@ export default function PageCurl({ side, w, h, g, m, front, back, rounded = true
       style={{
         position: 'absolute',
         top: 0,
-        left: mirrored ? 0 : w,
+        left: fullPage ? 0 : mirrored ? 0 : w,
         width: w,
         height: h,
         zIndex: 30,
