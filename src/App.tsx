@@ -30,6 +30,9 @@ import {
 export interface RawImageFile {
   name: string;
   url: string;
+  w?: number;
+  h?: number;
+  aspect?: number;
 }
 
 export type SliceType = 'left-half' | 'right-half' | 'full';
@@ -45,6 +48,8 @@ export interface SpreadPage {
   left: HalfDescriptor;
   right: HalfDescriptor;
   thumbUrl: string;
+  aspect: number;
+  isSingle?: boolean;
 }
 
 export type ReadingDirection = 'rtl' | 'ltr';
@@ -74,6 +79,63 @@ interface CurlState {
   h: number;
   g: Pt;
   m: Pt;
+}
+
+// --- 이미지 바이너리 헤더 파서 (PNG, JPEG, WebP, GIF 실시간 규격 감지) ---
+function parseImageSize(bytes: Uint8Array): { w: number; h: number } | null {
+  if (!bytes || bytes.length < 24) return null;
+  // PNG
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { w: view.getUint32(16), h: view.getUint32(20) };
+  }
+  // JPEG
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    while (offset < bytes.length) {
+      if (bytes[offset] !== 0xff) { offset++; continue; }
+      const marker = bytes[offset + 1];
+      offset += 2;
+      if (
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf)
+      ) {
+        const h = view.getUint16(offset + 3);
+        const w = view.getUint16(offset + 5);
+        return { w, h };
+      }
+      if (offset + 2 > bytes.length) break;
+      const len = view.getUint16(offset);
+      offset += len;
+    }
+  }
+  // GIF
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { w: view.getUint16(6, true), h: view.getUint16(8, true) };
+  }
+  // WebP
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    if (bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x20) {
+      return { w: bytes[26] | (bytes[27] << 8), h: bytes[28] | (bytes[29] << 8) };
+    }
+    if (bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x4c) {
+      const b1 = bytes[21], b2 = bytes[22], b3 = bytes[23];
+      const w = 1 + (((b2 & 0x3f) << 8) | b1);
+      const h = 1 + (((bytes[24] & 0xf) << 10) | (b3 << 2) | ((b2 & 0xc0) >> 6));
+      return { w, h };
+    }
+    if (bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x58) {
+      const w = 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16));
+      const h = 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16));
+      return { w, h };
+    }
+  }
+  return null;
 }
 
 const IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|avif|gif)$/i;
@@ -330,58 +392,95 @@ export default function App() {
   const pages = useMemo<SpreadPage[]>(() => {
     if (rawFiles.length === 0) return [];
     const list: SpreadPage[] = [];
+    // 가로세로 비율 >= 1.05 이면 2페이지 펼침면 이미지, 미만이면 단면(표지/속표지 등)
+    const isSpreadImage = (f: RawImageFile) => (f.aspect ? f.aspect >= 1.05 : false);
 
-    if (viewMode === 'spread') {
+    if (viewMode === 'split') {
+      // [단면 모드 - 폴드 커버 화면 & 세로 보기]:
+      // 2페이지 와이드 이미지는 반으로 쪼개고, 원래 단면(표지 등) 이미지는 쪼개지 않고 온전히 1장 표시
       rawFiles.forEach((f, idx) => {
-        list.push({
-          title: f.name,
-          left: { url: f.url, slice: 'left-half', label: String(idx + 1) + 'L' },
-          right: { url: f.url, slice: 'right-half', label: String(idx + 1) + 'R' },
-          thumbUrl: f.url,
-        });
-      });
-    } else if (viewMode === 'split') {
-      rawFiles.forEach((f, idx) => {
-        const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
-        const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
+        if (isSpreadImage(f)) {
+          const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
+          const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
 
-        list.push({
-          title: f.name + ' (1/2)',
-          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-          thumbUrl: f.url,
-        });
-
-        list.push({
-          title: f.name + ' (2/2)',
-          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-          thumbUrl: f.url,
-        });
-      });
-    } else {
-      for (let i = 0; i < rawFiles.length; i += 2) {
-        const f1 = rawFiles[i];
-        const f2 = rawFiles[i + 1];
-        if (f2) {
-          const leftFile = readingDirection === 'rtl' ? f2 : f1;
-          const rightFile = readingDirection === 'rtl' ? f1 : f2;
           list.push({
-            title: f1.name + ' / ' + f2.name,
-            left: { url: leftFile.url, slice: 'full', label: String(i + 1) },
-            right: { url: rightFile.url, slice: 'full', label: String(i + 2) },
-            thumbUrl: f1.url,
+            title: f.name + ' (1/2)',
+            left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+            right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+            thumbUrl: f.url,
+            aspect: (f.aspect || 1.4) / 2,
+            isSingle: true,
+          });
+
+          list.push({
+            title: f.name + ' (2/2)',
+            left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+            right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+            thumbUrl: f.url,
+            aspect: (f.aspect || 1.4) / 2,
+            isSingle: true,
           });
         } else {
+          // 단면 이미지 (표지/작가의 말 등): 쪼개지 않고 전체 화면 1장으로 깨끗하게 렌더링
           list.push({
-            title: f1.name,
-            left: { url: f1.url, slice: 'full', label: String(i + 1) },
-            right: { url: f1.url, slice: 'full', label: String(i + 1) },
-            thumbUrl: f1.url,
+            title: f.name,
+            left: { url: f.url, slice: 'full', label: String(idx + 1) },
+            right: { url: f.url, slice: 'full', label: String(idx + 1) },
+            thumbUrl: f.url,
+            aspect: f.aspect || 0.7,
+            isSingle: true,
           });
+        }
+      });
+    } else {
+      // [양면 펼침면 모드 - 대화면/내부 화면]:
+      // 와이드 이미지는 2페이지로 펼치고, 단면(표지 등)은 단독 1장 혹은 연속 단면 페어링
+      let i = 0;
+      while (i < rawFiles.length) {
+        const f = rawFiles[i];
+        if (isSpreadImage(f)) {
+          list.push({
+            title: f.name,
+            left: { url: f.url, slice: 'left-half', label: String(i + 1) + 'L' },
+            right: { url: f.url, slice: 'right-half', label: String(i + 1) + 'R' },
+            thumbUrl: f.url,
+            aspect: f.aspect || 1.414,
+            isSingle: false,
+          });
+          i++;
+        } else {
+          // 단면 이미지: 표지(i === 0)이거나 다음 장이 스프레드인 경우 단독 1장으로 표시
+          const next = rawFiles[i + 1];
+          if (i === 0 || !next || isSpreadImage(next)) {
+            list.push({
+              title: f.name,
+              left: { url: f.url, slice: 'full', label: String(i + 1) },
+              right: { url: f.url, slice: 'full', label: String(i + 1) },
+              thumbUrl: f.url,
+              aspect: f.aspect || 0.7,
+              isSingle: true,
+            });
+            i++;
+          } else {
+            // 연속된 두 단면 이미지: 2페이지 펼침면에 자연스럽게 나란히 배치!
+            const f1 = f;
+            const f2 = next;
+            const leftFile = readingDirection === 'rtl' ? f2 : f1;
+            const rightFile = readingDirection === 'rtl' ? f1 : f2;
+            list.push({
+              title: f1.name + ' + ' + f2.name,
+              left: { url: leftFile.url, slice: 'full', label: leftFile.name },
+              right: { url: rightFile.url, slice: 'full', label: rightFile.name },
+              thumbUrl: f1.url,
+              aspect: ((f1.aspect || 0.7) + (f2.aspect || 0.7)),
+              isSingle: false,
+            });
+            i += 2;
+          }
         }
       }
     }
+
     return list;
   }, [rawFiles, viewMode, readingDirection]);
 
@@ -398,7 +497,7 @@ export default function App() {
   }, [pages.length, currentIndex]);
 
   const currentSpread = pages[currentIndex] || null;
-  const isSinglePage = viewMode === 'split';
+  
 
   // --- 슬라이스 스타일 계산 헬퍼 ---
   const getSliceStyle = useCallback((desc?: HalfDescriptor): React.CSSProperties => {
@@ -424,29 +523,27 @@ export default function App() {
     };
   }, []);
 
-  // --- 섀시 크기 계산 (화면 꽉 채우기) ---
+  // --- 현재 페이지(스프레드) 종횡비에 실시간 맞춤 가변 섀시 크기 계산 ---
+  const currentSpread = pages[currentIndex];
+  const isDisplaySingle = viewMode === 'split' || !!currentSpread?.isSingle;
+
   const { chassisW, chassisH } = useMemo(() => {
-    const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.414;
-    const bookAspect =
-      viewMode === 'pair'
-        ? baseAspect * 2
-        : viewMode === 'split'
-        ? baseAspect / 2
-        : baseAspect;
+    // 현재 보고 있는 페이지 고유 종횡비 사용 (단면 표지면 세로형, 2페이지면 가로형 자동 가변)
+    const targetAspect = currentSpread?.aspect || (viewMode === 'split' ? 0.7 : 1.414);
 
     const availableW = containerSize.w * (immersive ? 1.0 : 0.96);
     const availableH = containerSize.h * (immersive ? 1.0 : 0.94);
 
     let w = availableW;
-    let h = w / bookAspect;
+    let h = w / targetAspect;
 
     if (h > availableH) {
       h = availableH;
-      w = h * bookAspect;
+      w = h * targetAspect;
     }
 
     return { chassisW: Math.round(w), chassisH: Math.round(h) };
-  }, [imgSize, viewMode, containerSize, immersive]);
+  }, [currentSpread, viewMode, containerSize, immersive]);
 
   // --- 다음 권 존재 여부 확인 ---
   const hasNextBook = useMemo(() => {
@@ -514,9 +611,15 @@ export default function App() {
       const ext = name.split('.').pop()?.toLowerCase() || 'jpeg';
       const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
       const blob = new Blob([bytes], { type: mime });
+      const size = parseImageSize(bytes);
+      const w = size?.w || 1000;
+      const h = size?.h || 700;
       return {
         name,
         url: URL.createObjectURL(blob),
+        w,
+        h,
+        aspect: w / h,
       };
     });
 
@@ -530,7 +633,7 @@ export default function App() {
   };
 
   // 일반 이미지 다중 선택 처리 (IndexedDB 영구 저장 연동)
-  const handleMultipleImageFiles = (files: FileList | File[], shouldPreservePage = false) => {
+  const handleMultipleImageFiles = async (files: FileList | File[], shouldPreservePage = false) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
       .sort((a, b) => collator.compare(a.name, b.name));
@@ -544,10 +647,23 @@ export default function App() {
     const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
     persistImagesList(persistItems, title);
 
-    const loaded: RawImageFile[] = valid.map((f) => ({
-      name: f.name,
-      url: URL.createObjectURL(f),
-    }));
+    const loaded: RawImageFile[] = await Promise.all(
+      valid.map(async (f) => {
+        let w = 1000, h = 700;
+        try {
+          const headerBytes = new Uint8Array(await f.slice(0, 65536).arrayBuffer());
+          const size = parseImageSize(headerBytes);
+          if (size) { w = size.w; h = size.h; }
+        } catch {}
+        return {
+          name: f.name,
+          url: URL.createObjectURL(f),
+          w,
+          h,
+          aspect: w / h,
+        };
+      })
+    );
 
     setRawFiles(loaded);
     if (!shouldPreservePage) {
@@ -680,7 +796,7 @@ export default function App() {
 
     const rect = chassis.getBoundingClientRect();
     const scale = rect.width / chassis.offsetWidth || 1;
-    const isSingle = viewMode === 'split';
+    const isSingle = isDisplaySingle;
 
     const w = isSingle ? chassis.offsetWidth : chassis.offsetWidth / 2;
     const h = chassis.offsetHeight;
@@ -763,7 +879,7 @@ export default function App() {
     if (!d || d.pointerId !== e.pointerId) return;
     dragStateRef.current = null;
 
-    const isSingle = viewMode === 'split';
+    const isSingle = isDisplaySingle;
 
     if (!d.moved) {
       // [단순 탭 동작]:
@@ -978,16 +1094,20 @@ export default function App() {
             onPointerUp={handleCurlUp}
             onPointerCancel={handleCurlUp}
           >
-            {isSinglePage ? (
-              /* [단면 모드 - 폴드 외부 화면 꽉참] */
-              <div className="w-full h-full relative overflow-hidden">
+            {isDisplaySingle ? (
+              /* [가변 단면 표시 - 단면 표지/작가의 말 또는 분할 모드] */
+              <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
                 <div
                   className="w-full h-full bg-no-repeat"
-                  style={getSliceStyle(curl && nextSpread ? nextSpread.left : currentSpread?.left)}
+                  style={getSliceStyle(
+                    curl && nextSpread
+                      ? (nextSpread.isSingle || isDisplaySingle ? nextSpread.left : nextSpread.right)
+                      : currentSpread?.left || currentSpread?.right
+                  )}
                 />
               </div>
             ) : (
-              /* [양면 모드 - 좌/우 2페이지] */
+              /* [가변 양면 표시 - 2페이지 펼침면] */
               <>
                 <div className="page-half left-0 rounded-l-[10px]">
                   <div
@@ -1013,7 +1133,7 @@ export default function App() {
               <div
                 className="pointer-events-none z-20"
                 style={
-                  isSinglePage && curl.side === 'right'
+                  isDisplaySingle && curl.side === 'right'
                     ? {
                         position: 'absolute',
                         top: 0,
@@ -1035,14 +1155,14 @@ export default function App() {
                   m={curl.m}
                   rounded={!immersive}
                   front={getSliceStyle(
-                    isSinglePage
+                    isDisplaySingle
                       ? currentSpread.left
                       : curl.side === 'right'
                       ? currentSpread.right
                       : currentSpread.left
                   )}
                   back={getSliceStyle(
-                    isSinglePage
+                    isDisplaySingle
                       ? nextSpread.left
                       : curl.side === 'right'
                       ? nextSpread.left
@@ -1052,8 +1172,8 @@ export default function App() {
               </div>
             )}
 
-            {/* 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
-            {!isSinglePage && creaseEnabled && <div className="center-crease" />}
+            {/* 중앙 제본선 음영은 펼침면 + creaseEnabled 일 때만 표시 (단면 표지에는 표시 안함) */}
+            {!isDisplaySingle && creaseEnabled && <div className="center-crease" />}
 
             {/* 권말 다음 권 안내 배너 */}
             {currentIndex === pages.length - 1 && hasNextBook && (
