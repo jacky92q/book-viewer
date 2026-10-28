@@ -64,6 +64,7 @@ interface DragState {
   cy: number;
   gy: number;
   moved: boolean;
+  atEndNext?: boolean;
 }
 
 interface CurlState {
@@ -162,7 +163,15 @@ export default function App() {
   });
 
   const [dirHandle, setDirHandle] = useState<LibraryDirHandle | null>(null);
-  const [archives, setArchives] = useState<string[]>([]);
+  const zipFilesMapRef = useRef<Map<string, File>>(new Map());
+  const [archives, setArchives] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('foldbook_archive_list');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [currentArchiveName, setCurrentArchiveName] = useState<string | null>(() => {
     return localStorage.getItem('foldbook_last_archive') || null;
   });
@@ -439,15 +448,29 @@ export default function App() {
     return { chassisW: Math.round(w), chassisH: Math.round(h) };
   }, [imgSize, viewMode, containerSize, immersive]);
 
-  // --- 다음 권 불러오기 로직 연결 ---
+  // --- 다음 권 존재 여부 확인 ---
+  const hasNextBook = useMemo(() => {
+    if (!currentArchiveName || archives.length === 0) return false;
+    const currentIdx = archives.indexOf(currentArchiveName);
+    return currentIdx !== -1 && currentIdx + 1 < archives.length;
+  }, [currentArchiveName, archives]);
+
+  // --- 다음 권 불러오기 로직 연결 (폴더 핸들 및 다중 ZIP 메모리 맵 모두 지원) ---
   const loadArchiveByIndex = useCallback(
     async (nextArchiveName: string, shouldPreservePage = false) => {
-      if (!dirHandle) return;
       try {
-        const file = await getArchiveFile(dirHandle, nextArchiveName);
-        await loadZipFile(file, shouldPreservePage);
-        setCurrentArchiveName(nextArchiveName);
-        if (!shouldPreservePage) setCurrentIndex(0);
+        let file: File | Blob | null = null;
+        if (zipFilesMapRef.current.has(nextArchiveName)) {
+          file = zipFilesMapRef.current.get(nextArchiveName)!;
+        } else if (dirHandle) {
+          file = await getArchiveFile(dirHandle, nextArchiveName);
+        }
+        if (file) {
+          await loadZipFile(file, shouldPreservePage);
+          setCurrentArchiveName(nextArchiveName);
+          localStorage.setItem('foldbook_last_archive', nextArchiveName);
+          if (!shouldPreservePage) setCurrentIndex(0);
+        }
       } catch (err) {
         console.error('다음 권 로드 실패:', err);
       }
@@ -460,7 +483,8 @@ export default function App() {
       if (!currentArchiveName || archives.length === 0) return;
       const currentIdx = archives.indexOf(currentArchiveName);
       if (currentIdx !== -1 && currentIdx + 1 < archives.length) {
-        loadArchiveByIndex(archives[currentIdx + 1]);
+        const nextName = archives[currentIdx + 1];
+        loadArchiveByIndex(nextName, false);
       }
     };
   }, [currentArchiveName, archives, loadArchiveByIndex]);
@@ -594,6 +618,7 @@ export default function App() {
       setDirHandle(handle);
       const list = await listArchives(handle);
       setArchives(list);
+      localStorage.setItem('foldbook_archive_list', JSON.stringify(list));
       if (list.length > 0) {
         setShowDrawer(true);
         const lastArch = localStorage.getItem('foldbook_last_archive');
@@ -714,7 +739,13 @@ export default function App() {
     const delta = isRightSwipe ? 1 : -1;
     const nextIdx = currentIndex + delta;
 
-    if (nextIdx < 0 || nextIdx >= pages.length) return;
+    if (nextIdx < 0) return;
+    if (nextIdx >= pages.length) {
+      if (hasNextBook && (readingDirection === 'rtl' ? dxClient > 0 : dxClient < 0)) {
+        d.atEndNext = true;
+      }
+      return;
+    }
 
     const g: Pt = { x: d.w, y: d.gy };
 
@@ -736,12 +767,16 @@ export default function App() {
 
     if (!d.moved) {
       // [단순 탭 동작]:
-      // 우측 탭 = 다음 페이지 (+1, 좌측 페이지 넘김)
-      // 좌측 탭 = 이전 페이지 (-1, 우측 페이지 넘김)
       const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
       const delta = isRightTap ? 1 : -1;
 
       const nextIdx = currentIndex + delta;
+      if (nextIdx >= pages.length && hasNextBook && (readingDirection === 'rtl' ? isRightTap : !isRightTap)) {
+        goNextBookRef.current();
+        playPageSound();
+        return;
+      }
+
       if (nextIdx >= 0 && nextIdx < pages.length) {
         const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
         const g: Pt = { x: d.w, y: d.h / 2 };
@@ -750,6 +785,18 @@ export default function App() {
         finishCurl(instantCurl, true);
       }
       return;
+    }
+
+    if (d.atEndNext) {
+      const dxClient = e.clientX - d.startX;
+      const isCompleteSwipe = readingDirection === 'rtl'
+        ? (d.vx > 0.15 || dxClient > d.w * 0.12)
+        : (d.vx < -0.15 || dxClient < -d.w * 0.12);
+      if (isCompleteSwipe) {
+        goNextBookRef.current();
+        playPageSound();
+        return;
+      }
     }
 
     if (!curl) return;
@@ -782,13 +829,16 @@ export default function App() {
             {archives.length > 0 && (
               <button
                 onClick={() => setShowDrawer((v) => !v)}
-                className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-950/70 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-200 text-xs sm:text-sm font-semibold transition-colors shadow-sm min-h-[38px]"
                 title="도서 목록 열기"
               >
-                <Menu className="w-5 h-5" />
+                <BookOpen className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span className="truncate max-w-[90px] sm:max-w-none">
+                  도서 목록 ({archives.length})
+                </span>
               </button>
             )}
-            <h1 className="text-sm sm:text-base font-semibold truncate max-w-[180px] sm:max-w-xs text-neutral-200">
+            <h1 className="text-sm sm:text-base font-semibold truncate max-w-[130px] sm:max-w-xs text-neutral-200">
               {bookTitle}
             </h1>
           </div>
@@ -805,10 +855,26 @@ export default function App() {
                 onChange={(e) => {
                   const files = e.target.files;
                   if (!files || files.length === 0) return;
-                  if (files.length === 1 && /\.(zip|cbz)$/i.test(files[0].name)) {
-                    loadZipFile(files[0]);
+                  const fileList = Array.from(files);
+                  const zips = fileList
+                    .filter((f) => /\.(zip|cbz)$/i.test(f.name))
+                    .sort((a, b) => collator.compare(a.name, b.name));
+
+                  if (zips.length > 0) {
+                    const map = new Map<string, File>();
+                    zips.forEach((f) => map.set(f.name, f));
+                    zipFilesMapRef.current = map;
+                    const names = zips.map((f) => f.name);
+                    setArchives(names);
+                    localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
+                    loadZipFile(zips[0]);
+                    setCurrentArchiveName(zips[0].name);
+                    localStorage.setItem('foldbook_last_archive', zips[0].name);
+                    if (zips.length > 1) {
+                      setShowDrawer(true);
+                    }
                   } else {
-                    handleMultipleImageFiles(files);
+                    handleMultipleImageFiles(fileList);
                   }
                   e.target.value = '';
                 }}
@@ -988,6 +1054,13 @@ export default function App() {
 
             {/* 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
             {!isSinglePage && creaseEnabled && <div className="center-crease" />}
+
+            {/* 권말 다음 권 안내 배너 */}
+            {currentIndex === pages.length - 1 && hasNextBook && (
+              <div className="absolute bottom-5 sm:bottom-8 px-4 py-2 bg-indigo-950/90 border border-indigo-500/40 rounded-full text-indigo-200 text-xs sm:text-sm font-medium shadow-2xl pointer-events-none z-30 animate-pulse backdrop-blur">
+                마지막 페이지입니다. 다음으로 넘기면 다음 권이 열립니다.
+              </div>
+            )}
           </div>
         )}
 
@@ -1015,10 +1088,17 @@ export default function App() {
               <ChevronLeft className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setCurrentIndex((idx) => Math.min(pages.length - 1, idx + 1))}
-              disabled={currentIndex >= pages.length - 1}
+              onClick={() => {
+                if (currentIndex < pages.length - 1) {
+                  setCurrentIndex((idx) => idx + 1);
+                } else if (hasNextBook) {
+                  goNextBookRef.current();
+                  playPageSound();
+                }
+              }}
+              disabled={currentIndex >= pages.length - 1 && !hasNextBook}
               className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 disabled:opacity-30 disabled:pointer-events-none min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
-              title="다음 페이지"
+              title={currentIndex >= pages.length - 1 && hasNextBook ? '다음 권으로 넘어가기' : '다음 페이지'}
             >
               <ChevronRight className="w-5 h-5" />
             </button>
