@@ -78,8 +78,63 @@ interface CurlState {
 const IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|avif|gif)$/i;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
+// --- IndexedDB 영구 저장 유틸리티 (앱 종료 후에도 책 파일 유지) ---
+const DB_NAME = 'FoldBookStorage';
+const DB_VERSION = 1;
+const STORE_NAME = 'saved_book';
+
+function openFoldBookDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error('IndexedDB not supported'));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function persistBookArchive(file: Blob, name: string) {
+  try {
+    const db = await openFoldBookDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(file, 'current_archive_blob');
+    store.put(name, 'current_archive_name');
+    store.delete('current_images_list');
+    await new Promise((res) => {
+      tx.oncomplete = res;
+    });
+  } catch (err) {
+    console.warn('아카이브 IndexedDB 저장 실패:', err);
+  }
+}
+
+async function persistImagesList(files: { name: string; blob: Blob }[], bookTitle: string) {
+  try {
+    const db = await openFoldBookDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(files, 'current_images_list');
+    store.put(bookTitle, 'current_archive_name');
+    store.delete('current_archive_blob');
+    await new Promise((res) => {
+      tx.oncomplete = res;
+    });
+  } catch (err) {
+    console.warn('이미지 목록 IndexedDB 저장 실패:', err);
+  }
+}
+
 export default function App() {
-  // --- 상태 관리 (문제 2 & 4: localStorage 상태 보존 및 제본선 디폴트 OFF) ---
+  // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
   const [bookTitle, setBookTitle] = useState<string>(() => {
     return localStorage.getItem('foldbook_last_book') || 'FoldBook 뷰어';
@@ -98,13 +153,13 @@ export default function App() {
     return saved ? parseInt(saved, 10) || 0 : 0;
   });
 
-  // 문제 4: 제본선 디폴트 OFF
+  // 제본선 디폴트 OFF
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('foldbook_crease');
     return saved !== null ? saved === 'true' : false;
   });
 
-  // 문제 3: 리얼 책 넘김 사운드 토글
+  // 사운드 토글
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('foldbook_sound');
     return saved !== null ? saved === 'true' : true;
@@ -116,6 +171,7 @@ export default function App() {
     return localStorage.getItem('foldbook_last_archive') || null;
   });
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
+  const [isLoadingSaved, setIsLoadingSaved] = useState<boolean>(false);
 
   const [immersive, setImmersive] = useState<boolean>(false);
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
@@ -154,7 +210,7 @@ export default function App() {
     localStorage.setItem('foldbook_last_index', String(currentIndex));
   }, [bookTitle, currentArchiveName, currentIndex]);
 
-  // --- 문제 3: 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
+  // --- 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
   const playPageSound = useCallback(() => {
     if (!soundEnabled) return;
     try {
@@ -165,7 +221,6 @@ export default function App() {
       const ctx = audioCtxRef.current;
       if (ctx.state === 'suspended') ctx.resume();
 
-      // 리얼한 종이 마찰음 (Pink Noise + Bandpass Filter)
       const duration = 0.22;
       const buffer = ctx.createBuffer(1, ctx.sampleRate * duration, ctx.sampleRate);
       const data = buffer.getChannelData(0);
@@ -237,7 +292,6 @@ export default function App() {
     const list: SpreadPage[] = [];
 
     if (viewMode === 'spread') {
-      // [양면 폴드북 모드]: 2페이지 1장 이미지를 좌/우로 나누어 펼침면에 배치
       rawFiles.forEach((f, idx) => {
         list.push({
           title: f.name,
@@ -247,10 +301,7 @@ export default function App() {
         });
       });
     } else if (viewMode === 'split') {
-      // [단면 분할 모드 - 갤럭시 폴드 외부화면]:
-      // 2페이지 이미지를 1페이지씩 쪼개어 세로 1장으로 순차 배치
       rawFiles.forEach((f, idx) => {
-        // 만화(rtl)는 우측 반쪽(1페이지) 먼저, 좌측 반쪽(2페이지) 나중
         const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
         const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
 
@@ -269,7 +320,6 @@ export default function App() {
         });
       });
     } else {
-      // [2장 합치기 모드 (pair)]
       for (let i = 0; i < rawFiles.length; i += 2) {
         const f1 = rawFiles[i];
         const f2 = rawFiles[i + 1];
@@ -384,9 +434,14 @@ export default function App() {
     };
   }, [currentArchiveName, archives, loadArchiveByIndex]);
 
-  // --- ZIP/CBZ 압축 해제 및 이미지 로드 ---
-  const loadZipFile = async (file: File) => {
-    setBookTitle(file.name.replace(/\.(zip|cbz)$/i, ''));
+  // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
+  const loadZipFile = async (file: File | Blob, shouldPreservePage = false) => {
+    const fileName = 'name' in file ? file.name : (currentArchiveName || '단행본.zip');
+    setBookTitle(fileName.replace(/\.(zip|cbz)$/i, ''));
+    
+    // 영구 저장소(IndexedDB)에 활성 책 보관
+    persistBookArchive(file, fileName);
+
     const arrayBuffer = await file.arrayBuffer();
     const unzipped = await new Promise<{ [key: string]: Uint8Array }>((resolve, reject) => {
       fflate.unzip(new Uint8Array(arrayBuffer), (err, data) => {
@@ -411,27 +466,91 @@ export default function App() {
     });
 
     setRawFiles(loadedFiles);
-    // 이전에 보던 페이지가 있다면 복구
-    const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-    setCurrentIndex(saved > 0 && saved < loadedFiles.length ? saved : 0);
+    if (!shouldPreservePage) {
+      setCurrentIndex(0);
+    } else {
+      const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+      setCurrentIndex(saved > 0 && saved < loadedFiles.length ? saved : 0);
+    }
   };
 
-  // 일반 이미지 다중 선택 처리 (문제 해결: .name 정렬)
-  const handleMultipleImageFiles = (files: FileList | File[]) => {
+  // 일반 이미지 다중 선택 처리 (IndexedDB 영구 저장 연동)
+  const handleMultipleImageFiles = (files: FileList | File[], shouldPreservePage = false) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
       .sort((a, b) => collator.compare(a.name, b.name));
+
+    if (valid.length === 0) return;
+
+    const title = valid[0]?.name.split('.')[0] || '단행본';
+    setBookTitle(title);
+
+    // IndexedDB에 이미지 블롭 영구 보관
+    const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
+    persistImagesList(persistItems, title);
 
     const loaded: RawImageFile[] = valid.map((f) => ({
       name: f.name,
       url: URL.createObjectURL(f),
     }));
 
-    setBookTitle(valid[0]?.name.split('.')[0] || '단행본');
     setRawFiles(loaded);
-    const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-    setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
+    if (!shouldPreservePage) {
+      setCurrentIndex(0);
+    } else {
+      const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+      setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
+    }
   };
+
+  // --- 앱 시작 시 이전 독서 세션 자동 복원 (IndexedDB + LocalStorage) ---
+  useEffect(() => {
+    let isCancelled = false;
+    async function restorePreviousReadingSession() {
+      setIsLoadingSaved(true);
+      try {
+        const db = await openFoldBookDB();
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const fileReq = store.get('current_archive_blob');
+        const nameReq = store.get('current_archive_name');
+        const imagesReq = store.get('current_images_list');
+
+        await new Promise((res) => {
+          tx.oncomplete = res;
+        });
+
+        if (isCancelled) return;
+
+        if (fileReq.result) {
+          const blob = fileReq.result as Blob;
+          const fileName = (nameReq.result as string) || '단행본.zip';
+          const file = new File([blob], fileName);
+          await loadZipFile(file, true);
+        } else if (imagesReq.result && Array.isArray(imagesReq.result) && imagesReq.result.length > 0) {
+          const imgItems = imagesReq.result as { name: string; blob: Blob }[];
+          const title = (nameReq.result as string) || '단행본';
+          setBookTitle(title);
+          const loaded: RawImageFile[] = imgItems.map((item) => ({
+            name: item.name,
+            url: URL.createObjectURL(item.blob),
+          }));
+          setRawFiles(loaded);
+          const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+          setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
+        }
+      } catch (err) {
+        console.warn('이전 세션 복원 건너뜀:', err);
+      } finally {
+        if (!isCancelled) setIsLoadingSaved(false);
+      }
+    }
+
+    restorePreviousReadingSession();
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
 
   // 도서관 디렉터리 선택
   const handlePickDirectory = async () => {
@@ -446,7 +565,6 @@ export default function App() {
       setArchives(list);
       if (list.length > 0) {
         setShowDrawer(true);
-        // 마지막으로 읽던 아카이브가 목록에 있다면 우선 열기
         const lastArch = localStorage.getItem('foldbook_last_archive');
         const target = lastArch && list.includes(lastArch) ? lastArch : list[0];
         loadArchiveByIndex(target);
@@ -499,7 +617,7 @@ export default function App() {
     [playPageSound]
   );
 
-  // --- 제스처 이벤트 핸들러 (문제 1: 플리커 완벽 차단) ---
+  // --- 제스처 이벤트 핸들러 (플리커 완벽 차단) ---
   const handleCurlDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const chassis = chassisRef.current;
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
@@ -534,8 +652,6 @@ export default function App() {
       moved: false,
     };
 
-    // [문제 1 플리커 해결]: 누르는 순간에는 curl을 미리 올리지 않고 좌표만 캡처하여
-    // 반대편 페이지가 0.01초간 번쩍하는 플리커 현상을 완전히 원천 차단합니다.
     chassis.setPointerCapture(e.pointerId);
   };
 
@@ -571,9 +687,6 @@ export default function App() {
 
     const g: Pt = { x: d.w, y: d.gy };
 
-    // 로컬 좌표계:
-    // side === 'left': 좌에서 우로 쓸기(dxClient > 0) -> m.x가 d.w에서 제본선 방향으로 감소
-    // side === 'right': 우에서 좌로 쓸기(dxClient < 0) -> m.x가 d.w에서 제본선 방향으로 감소
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
@@ -613,7 +726,6 @@ export default function App() {
     const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
 
-    // 제본선 방향 플릭 속도 (px/ms)
     const towardSpine = curl.side === 'left' ? d.vx : -d.vx;
 
     let complete: boolean;
@@ -632,7 +744,7 @@ export default function App() {
 
   return (
     <div className="flex flex-col w-screen h-screen bg-neutral-950 text-neutral-100 overflow-hidden select-none">
-      {/* --- 문제 5: 상단 툴바 버튼 크기 및 터치 영역 확대 --- */}
+      {/* --- 상단 툴바 (버튼 및 터치 영역 확대) --- */}
       {!immersive && (
         <header className="flex items-center justify-between px-3 sm:px-5 py-3 bg-neutral-900 border-b border-neutral-800 z-30 shrink-0 min-h-[56px]">
           <div className="flex items-center gap-2.5">
@@ -683,7 +795,7 @@ export default function App() {
 
             <div className="w-[1px] h-5 bg-neutral-800 mx-0.5" />
 
-            {/* 보기 모드 전환 (버튼 크기 확대) */}
+            {/* 보기 모드 전환 */}
             <button
               onClick={() =>
                 setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))
@@ -713,7 +825,7 @@ export default function App() {
               </span>
             </button>
 
-            {/* 문제 3: 사운드 ON/OFF 버튼 */}
+            {/* 사운드 ON/OFF 버튼 */}
             <button
               onClick={() => setSoundEnabled((v) => !v)}
               className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
@@ -748,7 +860,9 @@ export default function App() {
         {pages.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-neutral-500 gap-3">
             <BookOpen className="w-14 h-14 stroke-[1.5] text-indigo-400/80" />
-            <p className="text-sm sm:text-base font-medium">ZIP, CBZ 파일이나 이미지 폴더를 열어주세요.</p>
+            <p className="text-sm sm:text-base font-medium">
+              {isLoadingSaved ? '이전 독서 기록을 불러오는 중...' : 'ZIP, CBZ 파일이나 이미지 폴더를 열어주세요.'}
+            </p>
           </div>
         ) : (
           <div
@@ -768,7 +882,7 @@ export default function App() {
           >
             {isSinglePage ? (
               /* [단면 모드 - 폴드 외부 화면 꽉참] */
-              <div className="w-full h-full relative overflow-hidden">
+              <div className="absolute inset-0 overflow-hidden">
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(curl && nextSpread ? nextSpread.left : currentSpread?.left)}
@@ -798,31 +912,43 @@ export default function App() {
 
             {/* 3D 책장 넘김 레이어 */}
             {curl && nextSpread && currentSpread && (
-              <PageCurl
-                side={curl.side}
-                w={curl.w}
-                h={curl.h}
-                g={curl.g}
-                m={curl.m}
-                rounded={!immersive}
-                front={getSliceStyle(
-                  isSinglePage
-                    ? currentSpread.left
-                    : curl.side === 'right'
-                    ? currentSpread.right
-                    : currentSpread.left
-                )}
-                back={getSliceStyle(
-                  isSinglePage
-                    ? nextSpread.left
-                    : curl.side === 'right'
-                    ? nextSpread.left
-                    : nextSpread.right
-                )}
-              />
+              <div
+                className="absolute inset-0 pointer-events-none z-20 overflow-hidden"
+                style={
+                  !isSinglePage
+                    ? {
+                        left: curl.side === 'left' ? 0 : '50%',
+                        width: '50%',
+                      }
+                    : undefined
+                }
+              >
+                <PageCurl
+                  side={curl.side}
+                  w={curl.w}
+                  h={curl.h}
+                  g={curl.g}
+                  m={curl.m}
+                  rounded={!immersive}
+                  front={getSliceStyle(
+                    isSinglePage
+                      ? currentSpread.left
+                      : curl.side === 'right'
+                      ? currentSpread.right
+                      : currentSpread.left
+                  )}
+                  back={getSliceStyle(
+                    isSinglePage
+                      ? nextSpread.left
+                      : curl.side === 'right'
+                      ? nextSpread.left
+                      : nextSpread.right
+                  )}
+                />
+              </div>
             )}
 
-            {/* 문제 4: 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
+            {/* 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
             {!isSinglePage && creaseEnabled && <div className="center-crease" />}
           </div>
         )}
