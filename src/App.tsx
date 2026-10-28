@@ -16,7 +16,7 @@ import {
   X
 } from 'lucide-react';
 import { unzip } from 'fflate';
-import PageCurl from './PageCurl';
+import PageCurl from './PageCurlComponent';
 import { kvDel, kvGet, kvSet } from './storage';
 import {
   ensureReadPermission,
@@ -49,7 +49,8 @@ interface SpreadPage {
 }
 
 type ReadingDirection = 'rtl' | 'ltr';
-type ViewMode = 'spread' | 'split' | 'pair';
+type ViewMode = 'spread' | 'split' | 'single' | 'pair';
+type PageTurnSide = 'left' | 'right';
 
 type BookSource = 'single' | 'library' | 'queue';
 
@@ -64,6 +65,7 @@ interface SavedProgress {
   index: number;
   viewMode: ViewMode;
   readingDirection: ReadingDirection;
+  pageTurnSide: PageTurnSide;
 }
 
 interface LoadOpts {
@@ -115,6 +117,7 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [readingDirection, setReadingDirection] = useState<ReadingDirection>('rtl');
   const [viewMode, setViewMode] = useState<ViewMode>('spread');
+  const [pageTurnSide, setPageTurnSide] = useState<PageTurnSide>('right');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
   const [zoom, setZoom] = useState<number>(1);
@@ -256,12 +259,13 @@ export default function App() {
       void kvSet('progress', {
         name: cur.name,
         index: currentIndex,
-        viewMode,
-        readingDirection
+        viewMode: viewMode === 'split' ? 'single' : viewMode,
+        readingDirection,
+        pageTurnSide
       } satisfies SavedProgress);
     }, 250);
     return () => window.clearTimeout(t);
-  }, [currentIndex, viewMode, readingDirection, rawFiles.length, currentBookName]);
+  }, [currentIndex, viewMode, readingDirection, pageTurnSide, rawFiles.length, currentBookName]);
 
   // Build spreads based on viewMode and readingDirection
   const pages = useMemo<SpreadPage[]>(() => {
@@ -277,22 +281,23 @@ export default function App() {
           thumbUrl: f.url
         });
       });
-    } else if (viewMode === 'split') {
+    } else if (viewMode === 'single' || viewMode === 'split') {
       rawFiles.forEach((f, idx) => {
         const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
         const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
-        list.push({
-          title: `${f.name} (1/2)`,
-          left: { url: f.url, slice: firstSlice, label: `${idx + 1}-1` },
-          right: { url: f.url, slice: firstSlice, label: `${idx + 1}-1` },
+        const firstPage = {
+          title: `${f.name} (${readingDirection === 'rtl' ? '오른쪽' : '왼쪽'} 페이지)`,
+          left: { url: f.url, slice: firstSlice, label: `${idx + 1}-L` },
+          right: { url: f.url, slice: firstSlice, label: `${idx + 1}-L` },
           thumbUrl: f.url
-        });
-        list.push({
-          title: `${f.name} (2/2)`,
-          left: { url: f.url, slice: secondSlice, label: `${idx + 1}-2` },
-          right: { url: f.url, slice: secondSlice, label: `${idx + 1}-2` },
+        };
+        const secondPage = {
+          title: `${f.name} (${readingDirection === 'rtl' ? '왼쪽' : '오른쪽'} 페이지)`,
+          left: { url: f.url, slice: secondSlice, label: `${idx + 1}-R` },
+          right: { url: f.url, slice: secondSlice, label: `${idx + 1}-R` },
           thumbUrl: f.url
-        });
+        };
+        list.push(firstPage, secondPage);
       });
     } else {
       for (let i = 0; i < rawFiles.length; i += 2) {
@@ -384,8 +389,9 @@ export default function App() {
       const saved = await kvGet<SavedProgress>('progress');
       let index = 0;
       if (saved && saved.name === archive.name) {
-        if (saved.viewMode) setViewMode(saved.viewMode);
+        if (saved.viewMode) setViewMode(saved.viewMode === 'split' ? 'single' : saved.viewMode);
         if (saved.readingDirection) setReadingDirection(saved.readingDirection);
+        if (saved.pageTurnSide) setPageTurnSide(saved.pageTurnSide);
         index = Math.max(0, saved.index || 0);
       }
 
@@ -657,8 +663,7 @@ export default function App() {
     const cy = (e.clientY - rect.top) / scale;
 
     const side: 'left' | 'right' = cx < w ? 'left' : 'right';
-    const delta =
-      readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : side === 'right' ? 1 : -1;
+    const delta = side === pageTurnSide ? 1 : -1;
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
       // 마지막 페이지: 손을 뗄 때(사용자 동작 중) 다음 권을 불러온다
@@ -873,14 +878,23 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => setPageTurnSide((s) => (s === 'left' ? 'right' : 'left'))}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-cyan-300"
+          >
+            {pageTurnSide === 'left' ? '↩️ 좌측 넘김' : '↪️ 우측 넘김'}
+          </button>
+
+          <button
             onClick={() =>
-              setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))
+              setViewMode((m) =>
+                m === 'spread' ? 'single' : m === 'single' || m === 'split' ? 'pair' : 'spread'
+              )
             }
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-emerald-300 flex items-center gap-1"
           >
             <Columns className="w-4 h-4" />
             <span className="hidden md:inline">
-              {viewMode === 'spread' ? '양면 폴드북' : viewMode === 'split' ? '반쪽 분할' : '2장 합치기'}
+              {viewMode === 'spread' ? '양면 폴드북' : viewMode === 'single' || viewMode === 'split' ? '1장씩 보기' : '2장 합치기'}
             </span>
           </button>
 
