@@ -54,6 +54,7 @@ export interface SpreadPage {
 
 export type ReadingDirection = 'rtl' | 'ltr';
 export type ViewMode = 'spread' | 'split' | 'pair';
+export type TapAction = 'page' | 'menu';
 
 interface DragState {
   pointerId: number;
@@ -224,6 +225,12 @@ export default function App() {
     return saved !== null ? saved === 'true' : true;
   });
 
+  // 화면 단순 탭 동작 (페이지 넘김 vs 전체화면 메뉴 토글)
+  const [tapAction, setTapAction] = useState<TapAction>(() => {
+    return (localStorage.getItem('foldbook_tap_action') as TapAction) || 'page';
+  });
+  const [showImmersiveControls, setShowImmersiveControls] = useState<boolean>(false);
+
   const [dirHandle, setDirHandle] = useState<LibraryDirHandle | null>(null);
   const zipFilesMapRef = useRef<Map<string, File>>(new Map());
   const [archives, setArchives] = useState<string[]>(() => {
@@ -270,6 +277,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('foldbook_sound', String(soundEnabled));
   }, [soundEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('foldbook_tap_action', tapAction);
+  }, [tapAction]);
 
   useEffect(() => {
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
@@ -806,6 +817,7 @@ export default function App() {
     const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
     const g: Pt = { x: w, y: gy };
 
+    if (showImmersiveControls) setShowImmersiveControls(false);
     dragStateRef.current = {
       pointerId: e.pointerId,
       startX: e.clientX,
@@ -881,6 +893,14 @@ export default function App() {
 
     if (!d.moved) {
       // [단순 탭 동작]:
+      if (tapAction === 'menu') {
+        if (immersive) {
+          setShowImmersiveControls((v) => !v);
+        }
+        return;
+      }
+
+      // [화면 탭 = 페이지 넘김 (디폴트)]:
       const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
       const delta = isRightTap ? 1 : -1;
 
@@ -1182,14 +1202,21 @@ export default function App() {
           </div>
         )}
 
-        {immersive && (
-          <button
-            onClick={toggleFullscreen}
-            className="absolute top-4 right-4 p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg"
-            title="기본 모드로 복귀"
-          >
-            <Minimize2 className="w-5 h-5" />
-          </button>
+        {immersive && (tapAction === 'page' || showImmersiveControls) && (
+          <>
+            <button
+              onClick={toggleFullscreen}
+              className="absolute top-4 right-4 p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg transition-opacity duration-200"
+              title="기본 모드로 복귀"
+            >
+              <Minimize2 className="w-5 h-5" />
+            </button>
+            {tapAction === 'menu' && (
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-1.5 bg-neutral-900/80 border border-neutral-700/60 rounded-full text-xs text-neutral-300 backdrop-blur shadow-lg pointer-events-none z-50 font-mono">
+                {String(currentIndex + 1) + ' / ' + String(pages.length)}
+              </div>
+            )}
+          </>
         )}
       </main>
 
@@ -1237,6 +1264,19 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setTapAction((a) => (a === 'page' ? 'menu' : 'page'))}
+              className={
+                'px-2.5 sm:px-3 py-1.5 rounded-xl text-xs sm:text-sm font-medium transition-colors shadow-sm ' +
+                (tapAction === 'menu'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border border-neutral-700')
+              }
+              title="화면 단순 탭 동작 전환 (페이지 넘기기 vs 전체화면 메뉴 토글)"
+            >
+              {tapAction === 'menu' ? '탭: 메뉴 토글' : '탭: 페이지 넘김'}
+            </button>
+
             <button
               onClick={() => setCreaseEnabled((v) => !v)}
               className={
