@@ -1,5 +1,7 @@
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import os
+
+app_code = '''import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Columns,
   BookOpen,
@@ -75,7 +77,7 @@ interface CurlState {
   m: Pt;
 }
 
-const IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|avif|gif)$/i;
+const IMAGE_EXT_REGEX = /\\.(jpe?g|png|webp|avif|gif)$/i;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 // --- IndexedDB 영구 저장 유틸리티 (앱 종료 후에도 책 파일 유지) ---
@@ -437,7 +439,7 @@ export default function App() {
   // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
   const loadZipFile = async (file: File | Blob, shouldPreservePage = false) => {
     const fileName = 'name' in file ? file.name : (currentArchiveName || '단행본.zip');
-    setBookTitle(fileName.replace(/\.(zip|cbz)$/i, ''));
+    setBookTitle(fileName.replace(/\\.(zip|cbz)$/i, ''));
     
     // 영구 저장소(IndexedDB)에 활성 책 보관
     persistBookArchive(file, fileName);
@@ -774,7 +776,7 @@ export default function App() {
                 onChange={(e) => {
                   const files = e.target.files;
                   if (!files || files.length === 0) return;
-                  if (files.length === 1 && /\.(zip|cbz)$/i.test(files[0].name)) {
+                  if (files.length === 1 && /\\.(zip|cbz)$/i.test(files[0].name)) {
                     loadZipFile(files[0]);
                   } else {
                     handleMultipleImageFiles(files);
@@ -882,7 +884,7 @@ export default function App() {
           >
             {isSinglePage ? (
               /* [단면 모드 - 폴드 외부 화면 꽉참] */
-              <div className="absolute inset-0 overflow-hidden">
+              <div className="w-full h-full relative overflow-hidden">
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(curl && nextSpread ? nextSpread.left : currentSpread?.left)}
@@ -912,40 +914,28 @@ export default function App() {
 
             {/* 3D 책장 넘김 레이어 */}
             {curl && nextSpread && currentSpread && (
-              <div
-                className="absolute inset-0 pointer-events-none z-20 overflow-hidden"
-                style={
-                  !isSinglePage
-                    ? {
-                        left: curl.side === 'left' ? 0 : '50%',
-                        width: '50%',
-                      }
-                    : undefined
-                }
-              >
-                <PageCurl
-                  side={curl.side}
-                  w={curl.w}
-                  h={curl.h}
-                  g={curl.g}
-                  m={curl.m}
-                  rounded={!immersive}
-                  front={getSliceStyle(
-                    isSinglePage
-                      ? currentSpread.left
-                      : curl.side === 'right'
-                      ? currentSpread.right
-                      : currentSpread.left
-                  )}
-                  back={getSliceStyle(
-                    isSinglePage
-                      ? nextSpread.left
-                      : curl.side === 'right'
-                      ? nextSpread.left
-                      : nextSpread.right
-                  )}
-                />
-              </div>
+              <PageCurl
+                side={isSinglePage ? 'left' : curl.side}
+                w={curl.w}
+                h={curl.h}
+                g={curl.g}
+                m={curl.m}
+                rounded={!immersive}
+                front={getSliceStyle(
+                  isSinglePage
+                    ? currentSpread.left
+                    : curl.side === 'right'
+                    ? currentSpread.right
+                    : currentSpread.left
+                )}
+                back={getSliceStyle(
+                  isSinglePage
+                    ? nextSpread.left
+                    : curl.side === 'right'
+                    ? nextSpread.left
+                    : nextSpread.right
+                )}
+              />
             )}
 
             {/* 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
@@ -1054,3 +1044,8 @@ export default function App() {
     </div>
   );
 }
+
+out_path = '/working_dir/c_a52c8d8788364d19/artifacts/file_generation/ttl=63d/output/App.tsx'
+with open(out_path, 'w', encoding='utf-8') as f:
+    f.write(app_code.strip())
+print("Saved App.tsx with IndexedDB file persistence.")
