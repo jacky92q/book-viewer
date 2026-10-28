@@ -551,15 +551,17 @@ export default function App() {
     if (desc.slice === 'left-half') {
       return {
         backgroundImage: `url("${desc.url}")`,
-        backgroundSize: '200% 100%',
-        backgroundPosition: '0% center'
+        backgroundSize: 'auto 100%',
+        backgroundPosition: '0% center',
+        backgroundRepeat: 'no-repeat'
       };
     }
     if (desc.slice === 'right-half') {
       return {
         backgroundImage: `url("${desc.url}")`,
-        backgroundSize: '200% 100%',
-        backgroundPosition: '100% center'
+        backgroundSize: 'auto 100%',
+        backgroundPosition: '100% center',
+        backgroundRepeat: 'no-repeat'
       };
     }
     return {
@@ -667,8 +669,8 @@ export default function App() {
 
     const side: 'left' | 'right' = isSinglePage
       ? (pageTurnSide === 'left' ? 'right' : 'left')
-      : cx < w ? 'left' : 'right';
-    const delta = side === pageTurnSide ? 1 : -1;
+      : cx <= w ? 'left' : 'right';
+    const delta = side === 'left' ? 1 : -1;
     const nextIdx = currentIndex + delta;
     if (delta > 0 && nextIdx >= pages.length) {
       // 마지막 페이지: 손을 뗄 때(사용자 동작 중) 다음 권을 불러온다
@@ -716,7 +718,9 @@ export default function App() {
     d.lastX = e.clientX;
     d.lastT = now;
 
-    // 오른쪽 페이지는 왼쪽으로, 왼쪽 페이지는 오른쪽으로 끌면 제본선 쪽으로 접힌다
+    const dragMotion: 'left' | 'right' = e.clientX - d.startX > 0 ? 'left' : 'right';
+    if (Math.abs(e.clientX - d.startX) > 12) d.side = dragMotion;
+
     const dxLocal = (d.side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
     const m = clampCurlPoint({ x: d.g.x + dxLocal, y: d.g.y + dyLocal }, d.g, d.w, d.h);
@@ -770,8 +774,9 @@ export default function App() {
   const singlePageMode = viewMode === 'split';
 
   // 책 크기: 이미지 비율을 유지하면서 가능한 영역을 최대한 채운다
+  const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.5;
   const bookAspect = imgSize
-    ? (viewMode === 'pair' ? 2 : 1) * (imgSize.w / imgSize.h)
+    ? (viewMode === 'pair' ? 2 : viewMode === 'split' ? 0.5 : 1) * baseAspect
     : 1.5;
   const boxW = immersive ? viewport.w : Math.min(viewport.w * 0.86, 960);
   const boxH = immersive ? viewport.h : Math.min(viewport.h * 0.76, 720);
@@ -882,13 +887,6 @@ export default function App() {
               className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-amber-300"
             >
               {readingDirection === 'rtl' ? '만화책' : '일반책'}
-            </button>
-
-            <button
-              onClick={() => setPageTurnSide((s) => (s === 'left' ? 'right' : 'left'))}
-              className="h-9 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] sm:text-xs font-semibold text-cyan-300"
-            >
-              {pageTurnSide === 'left' ? '좌 넘김' : '우 넘김'}
             </button>
 
             <button
