@@ -231,6 +231,21 @@ export default function App() {
     };
   }, []);
 
+  // --- 접힌 뒷면 스타일 헬퍼 (side === 'right' 일 때 PageCurlComponent의 scaleX(-1) 반전 상쇄) ---
+  const getBackStyle = useCallback(
+    (desc?: HalfDescriptor, side?: 'left' | 'right'): React.CSSProperties => {
+      const base = getSliceStyle(desc);
+      if (side === 'right') {
+        return {
+          ...base,
+          transform: 'scaleX(-1)',
+        };
+      }
+      return base;
+    },
+    [getSliceStyle]
+  );
+
   // --- 섀시 크기 계산 (화면 꽉 채우기) ---
   const { chassisW, chassisH } = useMemo(() => {
     const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.414;
@@ -316,7 +331,7 @@ export default function App() {
   const handleMultipleImageFiles = (files: FileList | File[]) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
-      .sort((a, b) => collator.compare(a.name, b.name));
+      .sort((a, b) => collator.compare(a, b));
 
     const loaded: RawImageFile[] = valid.map((f) => ({
       name: f.name,
@@ -357,8 +372,8 @@ export default function App() {
 
       const startX = c.m.x;
       const startY = c.m.y;
-      // 완료 시 제본선 너머로 (-c.w), 취소(snap back) 시 원래 잡은 모서리(c.g)로 부드럽게 복귀
-      const targetX = complete ? -c.w : c.g.x;
+      // 완료 시 제본선 너머로 (-c.w * 0.98), 취소(snap back) 시 원래 잡은 모서리(c.g)로 부드럽게 복귀
+      const targetX = complete ? -(c.w * 0.98) : c.g.x;
       const targetY = c.g.y;
       const startTime = performance.now();
       const duration = 200;
@@ -701,12 +716,13 @@ export default function App() {
                       ? currentSpread.left
                       : currentSpread.right
                   )}
-                  back={getSliceStyle(
+                  back={getBackStyle(
                     isSinglePage
                       ? nextSpread.left
                       : curl.side === 'left'
                       ? nextSpread.right
-                      : nextSpread.left
+                      : nextSpread.left,
+                    curl.side
                   )}
                 />
               </div>
