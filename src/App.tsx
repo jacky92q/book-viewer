@@ -60,9 +60,10 @@ interface DragState {
   h: number;
   cx: number;
   cy: number;
-  gy: number;
+  g: Pt;
+  side: 'left' | 'right';
+  nextIdx: number;
   moved: boolean;
-  lockedSide: 'left' | 'right' | null;
 }
 
 interface CurlState {
@@ -231,21 +232,6 @@ export default function App() {
     };
   }, []);
 
-  // --- 접힌 뒷면 스타일 헬퍼 (side === 'right' 일 때 PageCurlComponent의 scaleX(-1) 반전 상쇄) ---
-  const getBackStyle = useCallback(
-    (desc?: HalfDescriptor, side?: 'left' | 'right'): React.CSSProperties => {
-      const base = getSliceStyle(desc);
-      if (side === 'right') {
-        return {
-          ...base,
-          transform: 'scaleX(-1)',
-        };
-      }
-      return base;
-    },
-    [getSliceStyle]
-  );
-
   // --- 섀시 크기 계산 (화면 꽉 채우기) ---
   const { chassisW, chassisH } = useMemo(() => {
     const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.414;
@@ -376,7 +362,7 @@ export default function App() {
       const targetX = complete ? -(c.w * 0.98) : c.g.x;
       const targetY = c.g.y;
       const startTime = performance.now();
-      const duration = 200;
+      const duration = 220;
 
       const animate = (now: number) => {
         const elapsed = now - startTime;
@@ -421,8 +407,17 @@ export default function App() {
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
 
+    // 터치한 위치에 따른 기본 사이드 결정
+    const side: 'left' | 'right' = isSingle ? (cx < w / 2 ? 'left' : 'right') : (cx < w ? 'left' : 'right');
+    // 만화(rtl) 기준: 좌측 페이지를 넘기면 다음 페이지(+1), 우측 페이지를 넘기면 이전 페이지(-1)
+    const delta = readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : (side === 'right' ? 1 : -1);
+    const nextIdx = currentIndex + delta;
+
+    if (nextIdx < 0 || nextIdx >= pages.length) return;
+
     const edgeY = cy < h / 2 ? 0 : h;
     const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
+    const g: Pt = { x: w, y: gy };
 
     dragStateRef.current = {
       pointerId: e.pointerId,
@@ -436,11 +431,15 @@ export default function App() {
       h,
       cx,
       cy,
-      gy,
+      g,
+      side,
+      nextIdx,
       moved: false,
-      lockedSide: null,
+      lockedSide: side,
     };
 
+    // [초기 프레임]: m을 g와 동일하게 초기화하여 누르는 순간 다음 장 이미지가 튀어나오는 현상을 완벽 방지!
+    setCurl({ side, nextIdx, w, h, g, m: g });
     chassis.setPointerCapture(e.pointerId);
   };
 
@@ -462,33 +461,32 @@ export default function App() {
       d.moved = true;
     }
 
-    if (!d.moved) return;
-
-    // [정확한 일본만화 진행 방향]:
-    // 좌에서 우로 쓸기 (dxClient > 0) -> [다음 페이지(+1)] 좌측 페이지 컬 (side = 'left')
-    // 우에서 좌로 쓸기 (dxClient < 0) -> [이전 페이지(-1)] 우측 페이지 컬 (side = 'right')
-    if (!d.lockedSide) {
-      d.lockedSide = dxClient > 0 ? 'left' : 'right';
+    // 스와이프 방향에 따른 능동적 사이드 전환 지원 (우측 화면에서 쓸어도 방향에 맞춰 전환)
+    let side = d.side;
+    if (Math.abs(dxClient) > 12) {
+      // 좌->우 쓸기 (dxClient > 0) -> [다음 페이지(+1)] 좌측 페이지 컬
+      // 우->좌 쓸기 (dxClient < 0) -> [이전 페이지(-1)] 우측 페이지 컬
+      side = dxClient > 0 ? 'left' : 'right';
     }
 
-    const side = d.lockedSide;
     const delta = side === 'left' ? 1 : -1;
     const nextIdx = currentIndex + delta;
 
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
-    const g: Pt = { x: d.w, y: d.gy };
+    d.side = side;
+    d.nextIdx = nextIdx;
 
     // 로컬 좌표계:
-    // side === 'left': 좌에서 우로 끌 때(dxClient > 0), m.x = d.w - dxLocal < d.w (제본선 방향으로 이동)
-    // side === 'right': 우에서 좌로 끌 때(dxClient < 0), m.x = d.w + dxLocal < d.w (제본선 방향으로 이동)
+    // side === 'left': 좌에서 우로 끌 때(dxClient > 0), m.x = d.w - dxLocal < d.w (제본선 방향으로 접힘)
+    // side === 'right': 우에서 좌로 끌 때(dxClient < 0), m.x = d.w + dxLocal < d.w (제본선 방향으로 접힘)
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
-    const mRaw: Pt = { x: d.w + dxLocal, y: d.gy + dyLocal };
-    const m = clampCurlPoint(mRaw, g, d.w, d.h);
+    const mRaw: Pt = { x: d.w + dxLocal, y: d.g.y + dyLocal };
+    const m = clampCurlPoint(mRaw, d.g, d.w, d.h);
 
-    setCurl({ side, nextIdx, w: d.w, h: d.h, g, m });
+    setCurl({ side, nextIdx, w: d.w, h: d.h, g: d.g, m });
   };
 
   const handleCurlUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -496,39 +494,24 @@ export default function App() {
     if (!d || d.pointerId !== e.pointerId) return;
     dragStateRef.current = null;
 
-    const isSingle = viewMode === 'split';
+    if (!curl) return;
 
     if (!d.moved) {
-      // [단순 탭 동작]:
-      // 우측 탭 = 다음 페이지 (+1, 좌측 페이지 넘김)
-      // 좌측 탭 = 이전 페이지 (-1, 우측 페이지 넘김)
-      const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
-      const delta = isRightTap ? 1 : -1;
-
-      const nextIdx = currentIndex + delta;
-      if (nextIdx >= 0 && nextIdx < pages.length) {
-        const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
-        const g: Pt = { x: d.w, y: d.h / 2 };
-        const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
-        setCurl(instantCurl);
-        finishCurl(instantCurl, true);
-      }
+      // 단순 탭: 즉시 해당 방향으로 넘김 애니메이션 완료
+      finishCurl(curl, true);
       return;
     }
-
-    if (!curl) return;
 
     const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
 
     // 제본선 방향 플릭 속도 (px/ms)
-    // side === 'left': dxClient > 0 (오른쪽 드래그) 시 vx > 0이 제본선 방향
-    // side === 'right': dxClient < 0 (왼쪽 드래그) 시 -vx > 0이 제본선 방향
+    // side === 'left': dxClient > 0 (오른쪽 드래그) 시 vx > 0이 넘기는 방향
+    // side === 'right': dxClient < 0 (왼쪽 드래그) 시 -vx > 0이 넘기는 방향
     const towardSpine = curl.side === 'left' ? d.vx : -d.vx;
 
-    // 가볍게 튕기기만 해도 시원하게 넘어가도록 판정 완화
     let complete: boolean;
-    if (towardSpine > 0.18) {
+    if (towardSpine > 0.20) {
       complete = true;
     } else if (towardSpine < -0.20) {
       complete = false;
@@ -690,42 +673,30 @@ export default function App() {
               </>
             )}
 
-            {/* 3D 책장 넘김 레이어 */}
+            {/* 3D 책장 넘김 레이어: 불필요한 제한 래퍼 div 없이 섀시 자식으로 직접 렌더링! */}
             {curl && nextSpread && currentSpread && (
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: isSinglePage ? 0 : curl.side === 'left' ? 0 : curl.w,
-                  width: curl.w,
-                  height: curl.h,
-                  zIndex: 20,
-                }}
-              >
-                <PageCurl
-                  side={curl.side}
-                  w={curl.w}
-                  h={curl.h}
-                  g={curl.g}
-                  m={curl.m}
-                  rounded={!immersive}
-                  front={getSliceStyle(
-                    isSinglePage
-                      ? currentSpread.left
-                      : curl.side === 'left'
-                      ? currentSpread.left
-                      : currentSpread.right
-                  )}
-                  back={getBackStyle(
-                    isSinglePage
-                      ? nextSpread.left
-                      : curl.side === 'left'
-                      ? nextSpread.right
-                      : nextSpread.left,
-                    curl.side
-                  )}
-                />
-              </div>
+              <PageCurl
+                side={curl.side}
+                w={curl.w}
+                h={curl.h}
+                g={curl.g}
+                m={curl.m}
+                rounded={!immersive}
+                front={getSliceStyle(
+                  isSinglePage
+                    ? currentSpread.left
+                    : curl.side === 'right'
+                    ? currentSpread.right
+                    : currentSpread.left
+                )}
+                back={getSliceStyle(
+                  isSinglePage
+                    ? nextSpread.left
+                    : curl.side === 'right'
+                    ? nextSpread.left
+                    : nextSpread.right
+                )}
+              />
             )}
 
             {/* 중앙 제본선 음영은 양면 모드일 때만 표시 */}
