@@ -119,7 +119,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>('spread');
   const [pageTurnSide, setPageTurnSide] = useState<PageTurnSide>('right');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
+  const [creaseEnabled, setCreaseEnabled] = useState<boolean>(false);
   const [zoom, setZoom] = useState<number>(1);
   const [immersive, setImmersive] = useState<boolean>(false);
   const [hudVisible, setHudVisible] = useState<boolean>(true);
