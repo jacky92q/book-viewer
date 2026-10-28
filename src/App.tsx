@@ -331,7 +331,7 @@ export default function App() {
   const handleMultipleImageFiles = (files: FileList | File[]) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
-      .sort((a, b) => collator.compare(a, b));
+      .sort((a, b) => collator.compare(a.name, b.name));
 
     const loaded: RawImageFile[] = valid.map((f) => ({
       name: f.name,
