@@ -1,4 +1,4 @@
-```react
+
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Columns,
@@ -8,17 +8,10 @@ import {
   FolderOpen,
   Maximize2,
   Minimize2,
-  RotateCcw,
-  Volume2,
-  VolumeX,
-  ZoomIn,
-  ZoomOut,
-  Sliders,
   ArrowLeftRight,
-  Sparkles,
   FileArchive,
   Menu,
-  X
+  X,
 } from 'lucide-react';
 import * as fflate from 'fflate';
 import PageCurl from './PageCurl';
@@ -28,8 +21,7 @@ import {
   pickLibraryDir,
   listArchives,
   getArchiveFile,
-  ensureReadPermission,
-  type LibraryDirHandle
+  type LibraryDirHandle,
 } from './library';
 
 // --- 타입 정의 ---
@@ -95,10 +87,8 @@ export default function App() {
   const [currentArchiveName, setCurrentArchiveName] = useState<string | null>(null);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
 
-  const [zoom, setZoom] = useState<number>(1);
   const [immersive, setImmersive] = useState<boolean>(false);
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(false);
 
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
@@ -150,8 +140,8 @@ export default function App() {
       rawFiles.forEach((f, idx) => {
         list.push({
           title: f.name,
-          left: { url: f.url, slice: 'left-half', label: `${idx + 1}L` },
-          right: { url: f.url, slice: 'right-half', label: `${idx + 1}R` },
+          left: { url: f.url, slice: 'left-half', label: String(idx + 1) + "L" },
+          right: { url: f.url, slice: 'right-half', label: String(idx + 1) + "R" },
           thumbUrl: f.url,
         });
       });
@@ -164,16 +154,16 @@ export default function App() {
         const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
 
         list.push({
-          title: `${f.name} (1/2)`,
-          left: { url: f.url, slice: firstSlice, label: `${idx + 1}-1` },
-          right: { url: f.url, slice: firstSlice, label: `${idx + 1}-1` },
+          title: f.name + " (1/2)",
+          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + "-1" },
+          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + "-1" },
           thumbUrl: f.url,
         });
 
         list.push({
-          title: `${f.name} (2/2)`,
-          left: { url: f.url, slice: secondSlice, label: `${idx + 1}-2` },
-          right: { url: f.url, slice: secondSlice, label: `${idx + 1}-2` },
+          title: f.name + " (2/2)",
+          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + "-2" },
+          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + "-2" },
           thumbUrl: f.url,
         });
       });
@@ -186,16 +176,16 @@ export default function App() {
           const leftFile = readingDirection === 'rtl' ? f2 : f1;
           const rightFile = readingDirection === 'rtl' ? f1 : f2;
           list.push({
-            title: `${f1.name} / ${f2.name}`,
-            left: { url: leftFile.url, slice: 'full', label: `${i + 1}` },
-            right: { url: rightFile.url, slice: 'full', label: `${i + 2}` },
+            title: f1.name + " / " + f2.name,
+            left: { url: leftFile.url, slice: 'full', label: String(i + 1) },
+            right: { url: rightFile.url, slice: 'full', label: String(i + 2) },
             thumbUrl: f1.url,
           });
         } else {
           list.push({
             title: f1.name,
-            left: { url: f1.url, slice: 'full', label: `${i + 1}` },
-            right: { url: f1.url, slice: 'full', label: `${i + 1}` },
+            left: { url: f1.url, slice: 'full', label: String(i + 1) },
+            right: { url: f1.url, slice: 'full', label: String(i + 1) },
             thumbUrl: f1.url,
           });
         }
@@ -219,20 +209,20 @@ export default function App() {
     if (!desc) return {};
     if (desc.slice === 'left-half') {
       return {
-        backgroundImage: `url("${desc.url}")`,
+        backgroundImage: "url(" + desc.url + ")",
         backgroundSize: '200% 100%',
         backgroundPosition: '0% center',
       };
     }
     if (desc.slice === 'right-half') {
       return {
-        backgroundImage: `url("${desc.url}")`,
+        backgroundImage: "url(" + desc.url + ")",
         backgroundSize: '200% 100%',
         backgroundPosition: '100% center',
       };
     }
     return {
-      backgroundImage: `url("${desc.url}")`,
+      backgroundImage: "url(" + desc.url + ")",
       backgroundSize: 'contain',
       backgroundPosition: 'center center',
     };
@@ -362,7 +352,6 @@ export default function App() {
     (commit: boolean, c: CurlState) => {
       animatingRef.current = true;
 
-      // commit이면 제본선을 지나 반대편(-c.w)으로, snapback이면 원위치(c.w)로
       const endX = commit ? -c.w : c.w;
       const startX = c.m.x;
       const startY = c.m.y;
@@ -407,7 +396,6 @@ export default function App() {
     const scale = rect.width / chassis.offsetWidth || 1;
     const isSingle = viewMode === 'split';
 
-    // 단면은 전체 폭, 양면은 절반 폭이 1페이지 폭
     const w = isSingle ? chassis.offsetWidth : chassis.offsetWidth / 2;
     const h = chassis.offsetHeight;
 
@@ -447,7 +435,6 @@ export default function App() {
     let delta: number;
 
     if (isSingle) {
-      // [단면 모드 - 폴드 외부 화면]: 좌로 쓸면 다음 장, 우로 쓸면 이전 장
       if (dxClient < 0) {
         side = 'right';
         delta = 1;
@@ -456,9 +443,6 @@ export default function App() {
         delta = -1;
       }
     } else {
-      // [양면 모드]: 스와이프 방향에 따른 대상 페이지 결정!
-      // 좌에서 우로 쓸면 (dx > 0) -> 우측 화면에서 쓸어도 좌측 페이지가 오른쪽으로 넘어감
-      // 우에서 좌로 쓸면 (dx < 0) -> 좌측 화면에서 쓸어도 우측 페이지가 왼쪽으로 넘어감
       if (dxClient < 0) {
         side = 'right';
         delta = readingDirection === 'rtl' ? -1 : 1;
@@ -474,14 +458,10 @@ export default function App() {
     d.activeSide = side;
     d.nextIdx = nextIdx;
 
-    // 모서리 잡기 높이 계산
     const edgeY = d.cy < d.h / 2 ? 0 : d.h;
     const gy = Math.max(0, Math.min(d.h, d.cy * 0.3 + edgeY * 0.7));
     const g: Pt = { x: d.w, y: gy };
 
-    // 로컬 좌표 변환:
-    // right는 좌측으로 끌 때(dxClient < 0) m.x가 d.w에서 0으로 감소
-    // left는 우측으로 끌 때(dxClient > 0) m.x가 d.w에서 0으로 감소 (미러링 축 기준)
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
@@ -499,7 +479,6 @@ export default function App() {
     const isSingle = viewMode === 'split';
 
     if (!d.moved) {
-      // [단순 탭 동작]
       let tapSide: 'left' | 'right';
       let delta: number;
 
@@ -552,7 +531,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            {/* 파일 / 폴더 불러오기 */}
             <label className="cursor-pointer p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors">
               <FolderOpen className="w-4 h-4" />
               <input
@@ -584,7 +562,6 @@ export default function App() {
 
             <div className="w-[1px] h-4 bg-neutral-800 mx-1" />
 
-            {/* 보기 모드 변경 (양면 / 단면 꽉참 / 2장 합치기) */}
             <button
               onClick={() =>
                 setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))
@@ -602,7 +579,6 @@ export default function App() {
               </span>
             </button>
 
-            {/* 읽기 방향 변경 (우->좌 / 좌->우) */}
             <button
               onClick={() => setReadingDirection((d) => (d === 'rtl' ? 'ltr' : 'rtl'))}
               className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs font-medium text-neutral-200 flex items-center gap-1.5 transition-colors"
@@ -616,7 +592,6 @@ export default function App() {
 
             <div className="w-[1px] h-4 bg-neutral-800 mx-1" />
 
-            {/* 전체화면 / 몰입 모드 */}
             <button
               onClick={() => setImmersive(true)}
               className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
@@ -644,11 +619,11 @@ export default function App() {
             style={{
               width: chassisW,
               height: chassisH,
-              transform: `scale(${zoom})`,
             }}
-            className={`book-chassis cursor-grab active:cursor-grabbing relative overflow-hidden select-none touch-none ${
-              immersive ? 'book-chassis-bare' : 'rounded-[10px] shadow-2xl'
-            }`}
+            className={
+              "book-chassis cursor-grab active:cursor-grabbing relative overflow-hidden select-none touch-none " +
+              (immersive ? "book-chassis-bare" : "rounded-[10px] shadow-2xl")
+            }
             onPointerDown={handleCurlDown}
             onPointerMove={handleCurlMove}
             onPointerUp={handleCurlUp}
@@ -726,7 +701,6 @@ export default function App() {
           </div>
         )}
 
-        {/* 몰입 모드 해제 버튼 */}
         {immersive && (
           <button
             onClick={() => setImmersive(false)}
@@ -777,9 +751,10 @@ export default function App() {
           <div className="flex items-center gap-1">
             <button
               onClick={() => setCreaseEnabled((v) => !v)}
-              className={`px-2 py-1 rounded text-xs transition-colors ${
-                creaseEnabled ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
-              }`}
+              className={
+                "px-2 py-1 rounded text-xs transition-colors " +
+                (creaseEnabled ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200")
+              }
               title="중앙 제본선 음영 토글"
             >
               제본선
@@ -810,11 +785,12 @@ export default function App() {
                     loadArchiveByIndex(name);
                     setShowDrawer(false);
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs truncate transition-colors ${
-                    name === currentArchiveName
-                      ? 'bg-neutral-800 text-neutral-100 font-medium'
-                      : 'text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200'
-                  }`}
+                  className={
+                    "w-full text-left px-3 py-2 rounded-lg text-xs truncate transition-colors " +
+                    (name === currentArchiveName
+                      ? "bg-neutral-800 text-neutral-100 font-medium"
+                      : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200")
+                  }
                 >
                   {name}
                 </button>
@@ -826,4 +802,3 @@ export default function App() {
     </div>
   );
 }
-```
