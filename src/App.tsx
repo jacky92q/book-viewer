@@ -254,6 +254,41 @@ export default function App() {
     }
   }, [soundEnabled]);
 
+  // --- 브라우저 OS 알림바 숨김 & 전체화면 토글 (HTML5 Fullscreen API) ---
+  const toggleFullscreen = useCallback(async () => {
+    if (!document.fullscreenElement) {
+      try {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch (e) {
+        console.warn('전체화면 요청 실패:', e);
+      }
+      setImmersive(true);
+    } else {
+      try {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        }
+      } catch (e) {
+        console.warn('전체화면 해제 실패:', e);
+      }
+      setImmersive(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      setImmersive(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+    };
+  }, []);
+
   // --- 컨테이너 반응형 리사이즈 감지 ---
   useEffect(() => {
     if (!containerRef.current) return;
@@ -839,7 +874,7 @@ export default function App() {
 
             {/* 몰입 모드 (전체화면) */}
             <button
-              onClick={() => setImmersive(true)}
+              onClick={toggleFullscreen}
               className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
               title="전체화면 몰입 모드"
             >
@@ -852,7 +887,7 @@ export default function App() {
       {/* --- 메인 뷰어 캔버스 영역 --- */}
       <main
         ref={containerRef}
-        className="relative flex-1 flex items-center justify-center p-2 sm:p-4 overflow-hidden"
+        className={"relative flex-1 flex items-center justify-center overflow-hidden " + (immersive ? "p-0" : "p-2 sm:p-4")}
       >
         {pages.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-neutral-500 gap-3">
@@ -958,7 +993,7 @@ export default function App() {
 
         {immersive && (
           <button
-            onClick={() => setImmersive(false)}
+            onClick={toggleFullscreen}
             className="absolute top-4 right-4 p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg"
             title="기본 모드로 복귀"
           >
