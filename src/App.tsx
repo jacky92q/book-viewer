@@ -12,6 +12,8 @@ import {
   FileArchive,
   Menu,
   X,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import * as fflate from 'fflate';
 import PageCurl from './PageCurlComponent';
@@ -60,9 +62,7 @@ interface DragState {
   h: number;
   cx: number;
   cy: number;
-  g: Pt;
-  side: 'left' | 'right';
-  nextIdx: number;
+  gy: number;
   moved: boolean;
 }
 
@@ -79,21 +79,45 @@ const IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|avif|gif)$/i;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 export default function App() {
-  // --- 상태 관리 ---
+  // --- 상태 관리 (문제 2 & 4: localStorage 상태 보존 및 제본선 디폴트 OFF) ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
-  const [bookTitle, setBookTitle] = useState<string>('FoldBook 뷰어');
-  const [viewMode, setViewMode] = useState<ViewMode>('spread');
-  const [readingDirection, setReadingDirection] = useState<ReadingDirection>('rtl');
-  const [currentIndex, setCurrentIndex] = useState<number>(0);
+  const [bookTitle, setBookTitle] = useState<string>(() => {
+    return localStorage.getItem('foldbook_last_book') || 'FoldBook 뷰어';
+  });
+
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    return (localStorage.getItem('foldbook_view_mode') as ViewMode) || 'spread';
+  });
+
+  const [readingDirection, setReadingDirection] = useState<ReadingDirection>(() => {
+    return (localStorage.getItem('foldbook_reading_dir') as ReadingDirection) || 'rtl';
+  });
+
+  const [currentIndex, setCurrentIndex] = useState<number>(() => {
+    const saved = localStorage.getItem('foldbook_last_index');
+    return saved ? parseInt(saved, 10) || 0 : 0;
+  });
+
+  // 문제 4: 제본선 디폴트 OFF
+  const [creaseEnabled, setCreaseEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem('foldbook_crease');
+    return saved !== null ? saved === 'true' : false;
+  });
+
+  // 문제 3: 리얼 책 넘김 사운드 토글
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem('foldbook_sound');
+    return saved !== null ? saved === 'true' : true;
+  });
 
   const [dirHandle, setDirHandle] = useState<LibraryDirHandle | null>(null);
   const [archives, setArchives] = useState<string[]>([]);
-  const [currentArchiveName, setCurrentArchiveName] = useState<string | null>(null);
+  const [currentArchiveName, setCurrentArchiveName] = useState<string | null>(() => {
+    return localStorage.getItem('foldbook_last_archive') || null;
+  });
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
 
   const [immersive, setImmersive] = useState<boolean>(false);
-  const [creaseEnabled, setCreaseEnabled] = useState<boolean>(true);
-
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
 
@@ -105,6 +129,79 @@ export default function App() {
   const dragStateRef = useRef<DragState | null>(null);
   const animatingRef = useRef<boolean>(false);
   const goNextBookRef = useRef<() => void>(() => {});
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  // --- 상태 변경 시 LocalStorage 자동 저장 ---
+  useEffect(() => {
+    localStorage.setItem('foldbook_view_mode', viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem('foldbook_reading_dir', readingDirection);
+  }, [readingDirection]);
+
+  useEffect(() => {
+    localStorage.setItem('foldbook_crease', String(creaseEnabled));
+  }, [creaseEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('foldbook_sound', String(soundEnabled));
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
+    if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
+    localStorage.setItem('foldbook_last_index', String(currentIndex));
+  }, [bookTitle, currentArchiveName, currentIndex]);
+
+  // --- 문제 3: 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
+  const playPageSound = useCallback(() => {
+    if (!soundEnabled) return;
+    try {
+      if (!audioCtxRef.current) {
+        const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // 리얼한 종이 마찰음 (Pink Noise + Bandpass Filter)
+      const duration = 0.22;
+      const buffer = ctx.createBuffer(1, ctx.sampleRate * duration, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < data.length; i++) {
+        const t = i / data.length;
+        const white = Math.random() * 2 - 1;
+        b0 = 0.99765 * b0 + white * 0.0555179;
+        b1 = 0.96300 * b1 + white * 0.0750759;
+        b2 = 0.57000 * b2 + white * 0.1538520;
+        const pink = b0 + b1 + b2 + white * 0.5362;
+        const env = Math.sin(t * Math.PI) * Math.pow(1 - t, 0.7);
+        data[i] = pink * env * 0.38;
+      }
+
+      const noiseNode = ctx.createBufferSource();
+      noiseNode.buffer = buffer;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1450, ctx.currentTime);
+      filter.Q.setValueAtTime(1.1, ctx.currentTime);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.55, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+
+      noiseNode.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noiseNode.start();
+    } catch {
+      // AudioContext safe catch
+    }
+  }, [soundEnabled]);
 
   // --- 컨테이너 반응형 리사이즈 감지 ---
   useEffect(() => {
@@ -198,10 +295,15 @@ export default function App() {
     return list;
   }, [rawFiles, viewMode, readingDirection]);
 
-  // 페이지 인덱스 안전 보정
+  // 페이지 인덱스 복구 및 안전 보정
   useEffect(() => {
-    if (currentIndex >= pages.length && pages.length > 0) {
-      setCurrentIndex(pages.length - 1);
+    if (pages.length > 0) {
+      const savedIndex = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+      if (savedIndex > 0 && savedIndex < pages.length && currentIndex === 0) {
+        setCurrentIndex(savedIndex);
+      } else if (currentIndex >= pages.length) {
+        setCurrentIndex(pages.length - 1);
+      }
     }
   }, [pages.length, currentIndex]);
 
@@ -235,7 +337,6 @@ export default function App() {
   // --- 섀시 크기 계산 (화면 꽉 채우기) ---
   const { chassisW, chassisH } = useMemo(() => {
     const baseAspect = imgSize ? imgSize.w / imgSize.h : 1.414;
-    // 단면(split)은 세로 단면 비율(baseAspect / 2), 양면은 펼침면 비율
     const bookAspect =
       viewMode === 'pair'
         ? baseAspect * 2
@@ -310,10 +411,12 @@ export default function App() {
     });
 
     setRawFiles(loadedFiles);
-    setCurrentIndex(0);
+    // 이전에 보던 페이지가 있다면 복구
+    const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+    setCurrentIndex(saved > 0 && saved < loadedFiles.length ? saved : 0);
   };
 
-  // 일반 이미지 다중 선택 처리
+  // 일반 이미지 다중 선택 처리 (문제 해결: .name 정렬)
   const handleMultipleImageFiles = (files: FileList | File[]) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
@@ -326,7 +429,8 @@ export default function App() {
 
     setBookTitle(valid[0]?.name.split('.')[0] || '단행본');
     setRawFiles(loaded);
-    setCurrentIndex(0);
+    const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+    setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
   };
 
   // 도서관 디렉터리 선택
@@ -342,7 +446,10 @@ export default function App() {
       setArchives(list);
       if (list.length > 0) {
         setShowDrawer(true);
-        loadArchiveByIndex(list[0]);
+        // 마지막으로 읽던 아카이브가 목록에 있다면 우선 열기
+        const lastArch = localStorage.getItem('foldbook_last_archive');
+        const target = lastArch && list.includes(lastArch) ? lastArch : list[0];
+        loadArchiveByIndex(target);
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
@@ -355,10 +462,10 @@ export default function App() {
   const finishCurl = useCallback(
     (c: CurlState, complete: boolean) => {
       animatingRef.current = true;
+      if (complete) playPageSound();
 
       const startX = c.m.x;
       const startY = c.m.y;
-      // 완료 시 제본선 너머로 (-c.w * 0.98), 취소(snap back) 시 원래 잡은 모서리(c.g)로 부드럽게 복귀
       const targetX = complete ? -(c.w * 0.98) : c.g.x;
       const targetY = c.g.y;
       const startTime = performance.now();
@@ -389,10 +496,10 @@ export default function App() {
 
       requestAnimationFrame(animate);
     },
-    []
+    [playPageSound]
   );
 
-  // --- 제스처 이벤트 핸들러 ---
+  // --- 제스처 이벤트 핸들러 (문제 1: 플리커 완벽 차단) ---
   const handleCurlDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const chassis = chassisRef.current;
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
@@ -406,14 +513,6 @@ export default function App() {
 
     const cx = (e.clientX - rect.left) / scale;
     const cy = (e.clientY - rect.top) / scale;
-
-    // 터치한 위치에 따른 기본 사이드 결정
-    const side: 'left' | 'right' = isSingle ? (cx < w / 2 ? 'left' : 'right') : (cx < w ? 'left' : 'right');
-    // 만화(rtl) 기준: 좌측 페이지를 넘기면 다음 페이지(+1), 우측 페이지를 넘기면 이전 페이지(-1)
-    const delta = readingDirection === 'rtl' ? (side === 'left' ? 1 : -1) : (side === 'right' ? 1 : -1);
-    const nextIdx = currentIndex + delta;
-
-    if (nextIdx < 0 || nextIdx >= pages.length) return;
 
     const edgeY = cy < h / 2 ? 0 : h;
     const gy = Math.max(0, Math.min(h, cy * 0.3 + edgeY * 0.7));
@@ -431,14 +530,12 @@ export default function App() {
       h,
       cx,
       cy,
-      g,
-      side,
-      nextIdx,
+      gy,
       moved: false,
     };
 
-    // [초기 프레임]: m을 g와 동일하게 초기화하여 누르는 순간 다음 장 이미지가 튀어나오는 현상을 완벽 방지!
-    setCurl({ side, nextIdx, w, h, g, m: g });
+    // [문제 1 플리커 해결]: 누르는 순간에는 curl을 미리 올리지 않고 좌표만 캡처하여
+    // 반대편 페이지가 0.01초간 번쩍하는 플리커 현상을 완전히 원천 차단합니다.
     chassis.setPointerCapture(e.pointerId);
   };
 
@@ -456,36 +553,34 @@ export default function App() {
     const dxClient = e.clientX - d.startX;
     const dyClient = e.clientY - d.startY;
 
-    if (Math.abs(dxClient) > 6 || Math.abs(dyClient) > 6) {
+    if (Math.abs(dxClient) > 5 || Math.abs(dyClient) > 5) {
       d.moved = true;
     }
 
-    // 스와이프 방향에 따른 능동적 사이드 전환 지원 (우측 화면에서 쓸어도 방향에 맞춰 전환)
-    let side = d.side;
-    if (Math.abs(dxClient) > 12) {
-      // 좌->우 쓸기 (dxClient > 0) -> [다음 페이지(+1)] 좌측 페이지 컬
-      // 우->좌 쓸기 (dxClient < 0) -> [이전 페이지(-1)] 우측 페이지 컬
-      side = dxClient > 0 ? 'left' : 'right';
-    }
+    if (!d.moved) return;
 
-    const delta = side === 'left' ? 1 : -1;
+    // [정확한 방향 감지]:
+    // 좌에서 우로 쓸기 (dxClient > 0) -> [다음 페이지(+1)] 좌측 페이지 컬
+    // 우에서 좌로 쓸기 (dxClient < 0) -> [이전 페이지(-1)] 우측 페이지 컬
+    const isRightSwipe = dxClient > 0;
+    const side: 'left' | 'right' = isRightSwipe ? 'left' : 'right';
+    const delta = isRightSwipe ? 1 : -1;
     const nextIdx = currentIndex + delta;
 
     if (nextIdx < 0 || nextIdx >= pages.length) return;
 
-    d.side = side;
-    d.nextIdx = nextIdx;
+    const g: Pt = { x: d.w, y: d.gy };
 
     // 로컬 좌표계:
-    // side === 'left': 좌에서 우로 끌 때(dxClient > 0), m.x = d.w - dxLocal < d.w (제본선 방향으로 접힘)
-    // side === 'right': 우에서 좌로 끌 때(dxClient < 0), m.x = d.w + dxLocal < d.w (제본선 방향으로 접힘)
+    // side === 'left': 좌에서 우로 쓸기(dxClient > 0) -> m.x가 d.w에서 제본선 방향으로 감소
+    // side === 'right': 우에서 좌로 쓸기(dxClient < 0) -> m.x가 d.w에서 제본선 방향으로 감소
     const dxLocal = (side === 'right' ? dxClient : -dxClient) / d.scale;
     const dyLocal = dyClient / d.scale;
 
-    const mRaw: Pt = { x: d.w + dxLocal, y: d.g.y + dyLocal };
-    const m = clampCurlPoint(mRaw, d.g, d.w, d.h);
+    const mRaw: Pt = { x: d.w + dxLocal, y: d.gy + dyLocal };
+    const m = clampCurlPoint(mRaw, g, d.w, d.h);
 
-    setCurl({ side, nextIdx, w: d.w, h: d.h, g: d.g, m });
+    setCurl({ side, nextIdx, w: d.w, h: d.h, g, m });
   };
 
   const handleCurlUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -493,24 +588,36 @@ export default function App() {
     if (!d || d.pointerId !== e.pointerId) return;
     dragStateRef.current = null;
 
-    if (!curl) return;
+    const isSingle = viewMode === 'split';
 
     if (!d.moved) {
-      // 단순 탭: 즉시 해당 방향으로 넘김 애니메이션 완료
-      finishCurl(curl, true);
+      // [단순 탭 동작]:
+      // 우측 탭 = 다음 페이지 (+1, 좌측 페이지 넘김)
+      // 좌측 탭 = 이전 페이지 (-1, 우측 페이지 넘김)
+      const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
+      const delta = isRightTap ? 1 : -1;
+
+      const nextIdx = currentIndex + delta;
+      if (nextIdx >= 0 && nextIdx < pages.length) {
+        const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
+        const g: Pt = { x: d.w, y: d.h / 2 };
+        const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
+        setCurl(instantCurl);
+        finishCurl(instantCurl, true);
+      }
       return;
     }
+
+    if (!curl) return;
 
     const dxClient = e.clientX - d.startX;
     const progress = curlProgress(curl.m, d.w);
 
     // 제본선 방향 플릭 속도 (px/ms)
-    // side === 'left': dxClient > 0 (오른쪽 드래그) 시 vx > 0이 넘기는 방향
-    // side === 'right': dxClient < 0 (왼쪽 드래그) 시 -vx > 0이 넘기는 방향
     const towardSpine = curl.side === 'left' ? d.vx : -d.vx;
 
     let complete: boolean;
-    if (towardSpine > 0.20) {
+    if (towardSpine > 0.18) {
       complete = true;
     } else if (towardSpine < -0.20) {
       complete = false;
@@ -525,27 +632,28 @@ export default function App() {
 
   return (
     <div className="flex flex-col w-screen h-screen bg-neutral-950 text-neutral-100 overflow-hidden select-none">
-      {/* --- 상단 툴바 --- */}
+      {/* --- 문제 5: 상단 툴바 버튼 크기 및 터치 영역 확대 --- */}
       {!immersive && (
-        <header className="flex items-center justify-between px-4 py-2.5 bg-neutral-900 border-b border-neutral-800 z-30 shrink-0">
-          <div className="flex items-center gap-2">
+        <header className="flex items-center justify-between px-3 sm:px-5 py-3 bg-neutral-900 border-b border-neutral-800 z-30 shrink-0 min-h-[56px]">
+          <div className="flex items-center gap-2.5">
             {archives.length > 0 && (
               <button
                 onClick={() => setShowDrawer((v) => !v)}
-                className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-300"
+                className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
                 title="도서 목록 열기"
               >
                 <Menu className="w-5 h-5" />
               </button>
             )}
-            <h1 className="text-sm font-semibold truncate max-w-[200px] sm:max-w-xs text-neutral-200">
+            <h1 className="text-sm sm:text-base font-semibold truncate max-w-[180px] sm:max-w-xs text-neutral-200">
               {bookTitle}
             </h1>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <label className="cursor-pointer p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors">
-              <FolderOpen className="w-4 h-4" />
+          <div className="flex items-center gap-2">
+            {/* 파일 / 폴더 불러오기 */}
+            <label className="cursor-pointer p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm">
+              <FolderOpen className="w-5 h-5" />
               <input
                 type="file"
                 accept=".zip,.cbz,image/*"
@@ -566,23 +674,24 @@ export default function App() {
             {supportsDirPicker() && (
               <button
                 onClick={handlePickDirectory}
-                className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors"
+                className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
                 title="책 폴더 전체 연결"
               >
-                <FileArchive className="w-4 h-4" />
+                <FileArchive className="w-5 h-5" />
               </button>
             )}
 
-            <div className="w-[1px] h-4 bg-neutral-800 mx-1" />
+            <div className="w-[1px] h-5 bg-neutral-800 mx-0.5" />
 
+            {/* 보기 모드 전환 (버튼 크기 확대) */}
             <button
               onClick={() =>
                 setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))
               }
-              className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs font-medium text-neutral-200 flex items-center gap-1.5 transition-colors"
+              className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs sm:text-sm font-medium text-neutral-200 flex items-center gap-1.5 transition-colors shadow-sm min-h-[38px]"
               title="보기 모드 전환"
             >
-              <Columns className="w-4 h-4" />
+              <Columns className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" />
               <span className="hidden sm:inline">
                 {viewMode === 'spread'
                   ? '양면 폴드북'
@@ -592,25 +701,40 @@ export default function App() {
               </span>
             </button>
 
+            {/* 읽기 방향 전환 */}
             <button
               onClick={() => setReadingDirection((d) => (d === 'rtl' ? 'ltr' : 'rtl'))}
-              className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs font-medium text-neutral-200 flex items-center gap-1.5 transition-colors"
+              className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs sm:text-sm font-medium text-neutral-200 flex items-center gap-1.5 transition-colors shadow-sm min-h-[38px]"
               title="읽기 방향 전환"
             >
-              <ArrowLeftRight className="w-4 h-4" />
+              <ArrowLeftRight className="w-4 h-4 sm:w-5 sm:h-5 text-amber-400" />
               <span className="hidden sm:inline">
                 {readingDirection === 'rtl' ? '만화 (우->좌)' : '일반 (좌->우)'}
               </span>
             </button>
 
-            <div className="w-[1px] h-4 bg-neutral-800 mx-1" />
+            {/* 문제 3: 사운드 ON/OFF 버튼 */}
+            <button
+              onClick={() => setSoundEnabled((v) => !v)}
+              className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
+              title={soundEnabled ? '효과음 끄기' : '효과음 켜기'}
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-5 h-5 text-emerald-400" />
+              ) : (
+                <VolumeX className="w-5 h-5 text-neutral-400" />
+              )}
+            </button>
 
+            <div className="w-[1px] h-5 bg-neutral-800 mx-0.5" />
+
+            {/* 몰입 모드 (전체화면) */}
             <button
               onClick={() => setImmersive(true)}
-              className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
               title="전체화면 몰입 모드"
             >
-              <Maximize2 className="w-4 h-4" />
+              <Maximize2 className="w-5 h-5" />
             </button>
           </div>
         </header>
@@ -623,8 +747,8 @@ export default function App() {
       >
         {pages.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-neutral-500 gap-3">
-            <BookOpen className="w-12 h-12 stroke-[1.5]" />
-            <p className="text-sm">ZIP, CBZ 파일이나 이미지 폴더를 열어주세요.</p>
+            <BookOpen className="w-14 h-14 stroke-[1.5] text-indigo-400/80" />
+            <p className="text-sm sm:text-base font-medium">ZIP, CBZ 파일이나 이미지 폴더를 열어주세요.</p>
           </div>
         ) : (
           <div
@@ -672,7 +796,7 @@ export default function App() {
               </>
             )}
 
-            {/* 3D 책장 넘김 레이어: 불필요한 제한 래퍼 div 없이 섀시 자식으로 직접 렌더링! */}
+            {/* 3D 책장 넘김 레이어 */}
             {curl && nextSpread && currentSpread && (
               <PageCurl
                 side={curl.side}
@@ -698,7 +822,7 @@ export default function App() {
               />
             )}
 
-            {/* 중앙 제본선 음영은 양면 모드일 때만 표시 */}
+            {/* 문제 4: 중앙 제본선 음영은 양면 모드 + creaseEnabled 일 때만 표시 (디폴트 OFF) */}
             {!isSinglePage && creaseEnabled && <div className="center-crease" />}
           </div>
         )}
@@ -706,7 +830,7 @@ export default function App() {
         {immersive && (
           <button
             onClick={() => setImmersive(false)}
-            className="absolute top-4 right-4 p-2 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur"
+            className="absolute top-4 right-4 p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg"
             title="기본 모드로 복귀"
           >
             <Minimize2 className="w-5 h-5" />
@@ -716,12 +840,12 @@ export default function App() {
 
       {/* --- 하단 네비게이션 & 페이지 스크러버 --- */}
       {!immersive && pages.length > 0 && (
-        <footer className="flex items-center justify-between px-4 py-2.5 bg-neutral-900 border-t border-neutral-800 z-30 shrink-0">
+        <footer className="flex items-center justify-between px-3 sm:px-5 py-2.5 bg-neutral-900 border-t border-neutral-800 z-30 shrink-0 min-h-[52px]">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setCurrentIndex((idx) => Math.max(0, idx - 1))}
               disabled={currentIndex === 0}
-              className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-300 disabled:opacity-30 disabled:pointer-events-none"
+              className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 disabled:opacity-30 disabled:pointer-events-none min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
               title="이전 페이지"
             >
               <ChevronLeft className="w-5 h-5" />
@@ -729,37 +853,37 @@ export default function App() {
             <button
               onClick={() => setCurrentIndex((idx) => Math.min(pages.length - 1, idx + 1))}
               disabled={currentIndex >= pages.length - 1}
-              className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-300 disabled:opacity-30 disabled:pointer-events-none"
+              className="p-2 rounded-xl hover:bg-neutral-800 text-neutral-300 disabled:opacity-30 disabled:pointer-events-none min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors"
               title="다음 페이지"
             >
               <ChevronRight className="w-5 h-5" />
             </button>
           </div>
 
-          <div className="flex items-center gap-3 flex-1 max-w-md mx-4">
+          <div className="flex items-center gap-3 flex-1 max-w-md mx-3">
             <input
               type="range"
               min={0}
               max={pages.length - 1}
               value={currentIndex}
               onChange={(e) => setCurrentIndex(Number(e.target.value))}
-              className="w-full accent-neutral-300 h-1 bg-neutral-700 rounded-lg cursor-pointer"
+              className="w-full accent-indigo-400 h-1.5 bg-neutral-700 rounded-lg cursor-pointer"
             />
-            <span className="text-xs text-neutral-400 font-mono whitespace-nowrap min-w-[50px] text-right">
+            <span className="text-xs sm:text-sm text-neutral-400 font-mono whitespace-nowrap min-w-[55px] text-right">
               {String(currentIndex + 1) + ' / ' + String(pages.length)}
             </span>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={() => setCreaseEnabled((v) => !v)}
               className={
-                'px-2 py-1 rounded text-xs transition-colors ' +
-                (creaseEnabled ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200')
+                'px-3 py-1.5 rounded-xl text-xs sm:text-sm font-medium transition-colors shadow-sm ' +
+                (creaseEnabled ? 'bg-indigo-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border border-neutral-700')
               }
               title="중앙 제본선 음영 토글"
             >
-              제본선
+              제본선 {creaseEnabled ? 'ON' : 'OFF'}
             </button>
           </div>
         </footer>
@@ -768,15 +892,15 @@ export default function App() {
       {/* --- 사이드 서랍: 도서 목록 --- */}
       {showDrawer && (
         <div className="fixed inset-0 z-50 flex">
-          <div className="fixed inset-0 bg-black/60" onClick={() => setShowDrawer(false)} />
-          <div className="relative w-72 bg-neutral-900 h-full p-4 flex flex-col z-10 border-r border-neutral-800">
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowDrawer(false)} />
+          <div className="relative w-72 bg-neutral-900 h-full p-4 flex flex-col z-10 border-r border-neutral-800 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
-              <span className="text-sm font-semibold text-neutral-200">내 도서 목록</span>
+              <span className="text-sm font-bold text-neutral-200">내 도서 목록</span>
               <button
                 onClick={() => setShowDrawer(false)}
-                className="p-1 rounded hover:bg-neutral-800 text-neutral-400"
+                className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
             <div className="flex-1 overflow-y-auto mt-2 space-y-1">
@@ -788,10 +912,10 @@ export default function App() {
                     setShowDrawer(false);
                   }}
                   className={
-                    'w-full text-left px-3 py-2 rounded-lg text-xs truncate transition-colors ' +
+                    'w-full text-left px-3 py-2.5 rounded-xl text-xs sm:text-sm truncate transition-colors ' +
                     (name === currentArchiveName
-                      ? 'bg-neutral-800 text-neutral-100 font-medium'
-                      : 'text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200')
+                      ? 'bg-indigo-600/30 text-indigo-200 font-semibold border border-indigo-500/30'
+                      : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200')
                   }
                 >
                   {name}
