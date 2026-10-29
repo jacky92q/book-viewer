@@ -405,6 +405,9 @@ export default function App() {
   const animatingRef = useRef<boolean>(false);
   const goNextBookRef = useRef<() => void>(() => {});
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
+  const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mainLastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
 
   // --- 상태 변경 시 LocalStorage 자동 저장 ---
   useEffect(() => {
@@ -535,6 +538,14 @@ export default function App() {
       }
       setImmersive(false);
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -1038,6 +1049,11 @@ export default function App() {
 
     if (Math.abs(dxClient) > 5 || Math.abs(dyClient) > 5) {
       d.moved = true;
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapRef.current = null;
     }
 
     if (!d.moved) return;
@@ -1077,32 +1093,60 @@ export default function App() {
     const isSingle = isDisplaySingle;
 
     if (!d.moved) {
-      // [단순 탭 동작]:
-      if (tapAction === 'menu') {
-        if (immersive) {
-          setShowImmersiveControls((v) => !v);
+      const now = performance.now();
+      const last = lastTapRef.current;
+      const clientX = e.clientX;
+      const clientY = e.clientY;
+
+      // [더블 탭 감지]: 280ms 이내에 45px 반경 안을 두 번 탭한 경우 전체화면 토글
+      if (last && now - last.time < 280 && Math.hypot(clientX - last.x, clientY - last.y) < 45) {
+        if (singleTapTimerRef.current) {
+          clearTimeout(singleTapTimerRef.current);
+          singleTapTimerRef.current = null;
         }
+        lastTapRef.current = null;
+        toggleFullscreen();
         return;
       }
 
-      // [화면 탭 = 페이지 넘김 (디폴트)]:
-      const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
-      const delta = isRightTap ? 1 : -1;
+      lastTapRef.current = { time: now, x: clientX, y: clientY };
 
-      const nextIdx = currentIndex + delta;
-      if (nextIdx >= pages.length && hasNextBook && (readingDirection === 'rtl' ? isRightTap : !isRightTap)) {
-        goNextBookRef.current();
-        playPageSound();
-        return;
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
       }
 
-      if (nextIdx >= 0 && nextIdx < pages.length) {
-        const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
-        const g: Pt = { x: d.w, y: d.h / 2 };
-        const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
-        setCurl(instantCurl);
-        finishCurl(instantCurl, true);
-      }
+      singleTapTimerRef.current = setTimeout(() => {
+        singleTapTimerRef.current = null;
+        lastTapRef.current = null;
+
+        // [단순 싱글 탭 - 메뉴 토글 모드]
+        if (tapAction === 'menu') {
+          if (immersive) {
+            setShowImmersiveControls((v) => !v);
+          }
+          return;
+        }
+
+        // [단순 싱글 탭 - 페이지 넘김 모드 (디폴트)]
+        const isRightTap = isSingle ? d.cx >= d.w / 2 : d.cx >= d.w;
+        const delta = isRightTap ? 1 : -1;
+
+        const nextIdx = currentIndex + delta;
+        if (nextIdx >= pages.length && hasNextBook && (readingDirection === 'rtl' ? isRightTap : !isRightTap)) {
+          goNextBookRef.current();
+          playPageSound();
+          return;
+        }
+
+        if (nextIdx >= 0 && nextIdx < pages.length) {
+          const tapSide: 'left' | 'right' = delta > 0 ? 'left' : 'right';
+          const g: Pt = { x: d.w, y: d.h / 2 };
+          const instantCurl: CurlState = { side: tapSide, nextIdx, w: d.w, h: d.h, g, m: g };
+          setCurl(instantCurl);
+          finishCurl(instantCurl, true);
+        }
+      }, 240);
+
       return;
     }
 
@@ -1135,6 +1179,18 @@ export default function App() {
     }
 
     finishCurl(curl, complete);
+  };
+
+  const handleMainPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.target !== containerRef.current) return;
+    const now = performance.now();
+    const last = mainLastTapRef.current;
+    if (last && now - last.time < 280 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 45) {
+      mainLastTapRef.current = null;
+      toggleFullscreen();
+    } else {
+      mainLastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+    }
   };
 
   const nextSpread = curl ? pages[curl.nextIdx] : null;
@@ -1292,6 +1348,8 @@ export default function App() {
       <main
         ref={containerRef}
         className={"relative flex-1 flex items-center justify-center overflow-hidden " + (immersive ? "p-0" : "p-2 sm:p-4")}
+        onPointerUp={handleMainPointerUp}
+        onDoubleClick={toggleFullscreen}
       >
         {pages.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-neutral-400 gap-5 max-w-sm px-4 text-center">
@@ -1339,6 +1397,7 @@ export default function App() {
             onPointerMove={handleCurlMove}
             onPointerUp={handleCurlUp}
             onPointerCancel={handleCurlUp}
+            onDoubleClick={toggleFullscreen}
           >
             {isDisplaySingle ? (
               /* [가변 단면 표시 - 단면 표지/작가의 말 또는 분할 모드] */
