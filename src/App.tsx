@@ -14,6 +14,7 @@ import {
   X,
   Volume2,
   VolumeX,
+  Home,
 } from 'lucide-react';
 import * as fflate from 'fflate';
 import PageCurl from './PageCurlComponent';
@@ -50,6 +51,8 @@ export interface SpreadPage {
   thumbUrl: string;
   aspect: number;
   isSingle?: boolean;
+  rawIndex: number;
+  sliceIndex?: number;
 }
 
 export type ReadingDirection = 'rtl' | 'ltr';
@@ -196,6 +199,25 @@ async function persistImagesList(files: { name: string; blob: Blob }[], bookTitl
 export default function App() {
   // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
+  // --- 책별(권별) 독서 진행도 영구 보관 (LocalStorage) ---
+  const saveBookProgress = useCallback((bookKey: string, rawIdx: number, pageIdx: number) => {
+    if (!bookKey || bookKey === 'FoldBook 뷰어') return;
+    try {
+      const data = JSON.parse(localStorage.getItem('foldbook_books_progress') || '{}');
+      data[bookKey] = { rawIndex: rawIdx, pageIndex: pageIdx };
+      localStorage.setItem('foldbook_books_progress', JSON.stringify(data));
+    } catch {}
+  }, []);
+
+  const getBookProgress = useCallback((bookKey: string): { rawIndex: number; pageIndex: number } | null => {
+    try {
+      const data = JSON.parse(localStorage.getItem('foldbook_books_progress') || '{}');
+      return data[bookKey] || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const [bookTitle, setBookTitle] = useState<string>(() => {
     return localStorage.getItem('foldbook_last_book') || 'FoldBook 뷰어';
   });
@@ -289,7 +311,11 @@ export default function App() {
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
     if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
     localStorage.setItem('foldbook_last_index', String(currentIndex));
-  }, [bookTitle, currentArchiveName, currentIndex]);
+    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
+    if (bookKey && pages.length > 0 && pages[currentIndex]) {
+      saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
+    }
+  }, [bookTitle, currentArchiveName, currentIndex, pages, saveBookProgress]);
 
   // --- 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
   const playPageSound = useCallback(() => {
@@ -338,6 +364,55 @@ export default function App() {
       // AudioContext safe catch
     }
   }, [soundEnabled]);
+
+  // --- 보기 모드 전환 핸들러 (분할 <-> 양면 전환 시 현재 읽던 페이지 위치 정밀 유지) ---
+  const handleToggleViewMode = useCallback(() => {
+    if (pages.length === 0) {
+      setViewMode((m) => (m === 'spread' ? 'split' : 'spread'));
+      return;
+    }
+    const current = pages[currentIndex];
+    const currentRawIdx = current?.rawIndex ?? 0;
+    const currentSliceIdx = current?.sliceIndex ?? 0;
+
+    const nextMode: ViewMode = viewMode === 'spread' ? 'split' : 'spread';
+    const targetSpreads = buildSpreadsList(rawFiles, nextMode, readingDirection);
+
+    let matchIdx = targetSpreads.findIndex((s) => {
+      if (nextMode === 'split') {
+        return s.rawIndex === currentRawIdx && (s.sliceIndex ?? 0) === currentSliceIdx;
+      }
+      return s.rawIndex === currentRawIdx;
+    });
+
+    if (matchIdx === -1) {
+      matchIdx = targetSpreads.findIndex((s) => s.rawIndex >= currentRawIdx);
+      if (matchIdx === -1) matchIdx = Math.max(0, targetSpreads.length - 1);
+    }
+
+    setViewMode(nextMode);
+    setCurrentIndex(matchIdx);
+  }, [pages, currentIndex, viewMode, rawFiles, readingDirection]);
+
+  // --- 뷰어 홈으로 가기 (현재 책 닫기) ---
+  const handleGoHome = useCallback(() => {
+    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
+    if (bookKey && pages.length > 0 && pages[currentIndex]) {
+      saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
+    }
+    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
+    setRawFiles([]);
+    setCurrentIndex(0);
+    setBookTitle('FoldBook 뷰어');
+    setCurrentArchiveName(null);
+    localStorage.removeItem('foldbook_last_archive');
+    if (document.fullscreenElement) {
+      try {
+        document.exitFullscreen();
+      } catch {}
+    }
+    setImmersive(false);
+  }, [currentArchiveName, bookTitle, pages, currentIndex, rawFiles, saveBookProgress]);
 
   // --- 브라우저 OS 알림바 숨김 & 전체화면 토글 (HTML5 Fullscreen API) ---
   const toggleFullscreen = useCallback(async () => {
@@ -403,99 +478,112 @@ export default function App() {
   }, [rawFiles]);
 
   // --- 페이지 구성 생성 (useMemo) ---
-  const pages = useMemo<SpreadPage[]>(() => {
-    if (rawFiles.length === 0) return [];
-    const list: SpreadPage[] = [];
-    // 가로세로 비율 >= 1.05 이면 2페이지 펼침면 이미지, 미만이면 단면(표지/속표지 등)
-    const isSpreadImage = (f: RawImageFile) => (f.aspect ? f.aspect >= 1.05 : false);
+  // --- 이미지 종횡비 기반 가변 스마트 스프레드 생성 함수 (모드 전환 시 위치 보존용) ---
+function buildSpreadsList(
+  rawFiles: RawImageFile[],
+  viewMode: ViewMode,
+  readingDirection: ReadingDirection
+): SpreadPage[] {
+  if (rawFiles.length === 0) return [];
+  const list: SpreadPage[] = [];
+  const isSpreadImage = (f: RawImageFile) => (f.aspect ? f.aspect >= 1.05 : false);
 
-    if (viewMode === 'split') {
-      // [단면 모드 - 폴드 커버 화면 & 세로 보기]:
-      // 2페이지 와이드 이미지는 반으로 쪼개고, 원래 단면(표지 등) 이미지는 쪼개지 않고 온전히 1장 표시
-      rawFiles.forEach((f, idx) => {
-        if (isSpreadImage(f)) {
-          const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
-          const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
+  if (viewMode === 'split') {
+    rawFiles.forEach((f, idx) => {
+      if (isSpreadImage(f)) {
+        const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
+        const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
 
-          list.push({
-            title: f.name + ' (1/2)',
-            left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-            right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-            thumbUrl: f.url,
-            aspect: (f.aspect || 1.4) / 2,
-            isSingle: true,
-          });
+        list.push({
+          title: f.name + ' (1/2)',
+          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+          thumbUrl: f.url,
+          aspect: (f.aspect || 1.4) / 2,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 0,
+        });
 
-          list.push({
-            title: f.name + ' (2/2)',
-            left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-            right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-            thumbUrl: f.url,
-            aspect: (f.aspect || 1.4) / 2,
-            isSingle: true,
-          });
-        } else {
-          // 단면 이미지 (표지/작가의 말 등): 쪼개지 않고 전체 화면 1장으로 깨끗하게 렌더링
+        list.push({
+          title: f.name + ' (2/2)',
+          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+          thumbUrl: f.url,
+          aspect: (f.aspect || 1.4) / 2,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 1,
+        });
+      } else {
+        list.push({
+          title: f.name,
+          left: { url: f.url, slice: 'full', label: String(idx + 1) },
+          right: { url: f.url, slice: 'full', label: String(idx + 1) },
+          thumbUrl: f.url,
+          aspect: f.aspect || 0.7,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 0,
+        });
+      }
+    });
+  } else {
+    let i = 0;
+    while (i < rawFiles.length) {
+      const f = rawFiles[i];
+      if (isSpreadImage(f)) {
+        list.push({
+          title: f.name,
+          left: { url: f.url, slice: 'left-half', label: String(i + 1) + 'L' },
+          right: { url: f.url, slice: 'right-half', label: String(i + 1) + 'R' },
+          thumbUrl: f.url,
+          aspect: f.aspect || 1.414,
+          isSingle: false,
+          rawIndex: i,
+          sliceIndex: 0,
+        });
+        i++;
+      } else {
+        const next = rawFiles[i + 1];
+        if (i === 0 || !next || isSpreadImage(next)) {
           list.push({
             title: f.name,
-            left: { url: f.url, slice: 'full', label: String(idx + 1) },
-            right: { url: f.url, slice: 'full', label: String(idx + 1) },
+            left: { url: f.url, slice: 'full', label: String(i + 1) },
+            right: { url: f.url, slice: 'full', label: String(i + 1) },
             thumbUrl: f.url,
             aspect: f.aspect || 0.7,
             isSingle: true,
-          });
-        }
-      });
-    } else {
-      // [양면 펼침면 모드 - 대화면/내부 화면]:
-      // 와이드 이미지는 2페이지로 펼치고, 단면(표지 등)은 단독 1장 혹은 연속 단면 페어링
-      let i = 0;
-      while (i < rawFiles.length) {
-        const f = rawFiles[i];
-        if (isSpreadImage(f)) {
-          list.push({
-            title: f.name,
-            left: { url: f.url, slice: 'left-half', label: String(i + 1) + 'L' },
-            right: { url: f.url, slice: 'right-half', label: String(i + 1) + 'R' },
-            thumbUrl: f.url,
-            aspect: f.aspect || 1.414,
-            isSingle: false,
+            rawIndex: i,
+            sliceIndex: 0,
           });
           i++;
         } else {
-          // 단면 이미지: 표지(i === 0)이거나 다음 장이 스프레드인 경우 단독 1장으로 표시
-          const next = rawFiles[i + 1];
-          if (i === 0 || !next || isSpreadImage(next)) {
-            list.push({
-              title: f.name,
-              left: { url: f.url, slice: 'full', label: String(i + 1) },
-              right: { url: f.url, slice: 'full', label: String(i + 1) },
-              thumbUrl: f.url,
-              aspect: f.aspect || 0.7,
-              isSingle: true,
-            });
-            i++;
-          } else {
-            // 연속된 두 단면 이미지: 2페이지 펼침면에 자연스럽게 나란히 배치!
-            const f1 = f;
-            const f2 = next;
-            const leftFile = readingDirection === 'rtl' ? f2 : f1;
-            const rightFile = readingDirection === 'rtl' ? f1 : f2;
-            list.push({
-              title: f1.name + ' + ' + f2.name,
-              left: { url: leftFile.url, slice: 'full', label: leftFile.name },
-              right: { url: rightFile.url, slice: 'full', label: rightFile.name },
-              thumbUrl: f1.url,
-              aspect: ((f1.aspect || 0.7) + (f2.aspect || 0.7)),
-              isSingle: false,
-            });
-            i += 2;
-          }
+          const f1 = f;
+          const f2 = next;
+          const leftFile = readingDirection === 'rtl' ? f2 : f1;
+          const rightFile = readingDirection === 'rtl' ? f1 : f2;
+          list.push({
+            title: f1.name + ' + ' + f2.name,
+            left: { url: leftFile.url, slice: 'full', label: leftFile.name },
+            right: { url: rightFile.url, slice: 'full', label: rightFile.name },
+            thumbUrl: f1.url,
+            aspect: ((f1.aspect || 0.7) + (f2.aspect || 0.7)),
+            isSingle: false,
+            rawIndex: i,
+            sliceIndex: 0,
+          });
+          i += 2;
         }
       }
     }
+  }
 
-    return list;
+  return list;
+}
+
+  const pages = useMemo<SpreadPage[]>(() => {
+    return buildSpreadsList(rawFiles, viewMode, readingDirection);
   }, [rawFiles, viewMode, readingDirection]);
 
   // 페이지 인덱스 복구 및 안전 보정
@@ -644,7 +732,13 @@ export default function App() {
     });
 
     setRawFiles(loadedFiles);
-    if (!shouldPreservePage) {
+    // 책별 보관된 마지막 독서 위치 조회 및 복원
+    const savedBookProgress = getBookProgress(fileName);
+    if (savedBookProgress) {
+      const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
+      const matchIdx = targetSpreads.findIndex((s) => s.rawIndex === savedBookProgress.rawIndex);
+      setCurrentIndex(matchIdx !== -1 ? matchIdx : Math.min(savedBookProgress.pageIndex, Math.max(0, targetSpreads.length - 1)));
+    } else if (!shouldPreservePage) {
       setCurrentIndex(0);
     } else {
       const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
@@ -701,7 +795,13 @@ export default function App() {
     );
 
     setRawFiles(loaded);
-    if (!shouldPreservePage) {
+    // 폴더/이미지 책별 보관된 마지막 독서 위치 복원
+    const savedBookProgress = getBookProgress(title);
+    if (savedBookProgress) {
+      const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
+      const matchIdx = targetSpreads.findIndex((s) => s.rawIndex === savedBookProgress.rawIndex);
+      setCurrentIndex(matchIdx !== -1 ? matchIdx : Math.min(savedBookProgress.pageIndex, Math.max(0, targetSpreads.length - 1)));
+    } else if (!shouldPreservePage) {
       setCurrentIndex(0);
     } else {
       const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
@@ -900,6 +1000,15 @@ export default function App() {
     const chassis = chassisRef.current;
     if (curl !== null || animatingRef.current || pages.length <= 1 || !chassis) return;
 
+    // 모바일에서 홈 다녀왔을 때 터치 한 번으로 OS 전체화면 복구
+    if (immersive && !document.fullscreenElement) {
+      try {
+        if (document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen();
+        }
+      } catch {}
+    }
+
     const rect = chassis.getBoundingClientRect();
     const scale = rect.width / chassis.offsetWidth || 1;
     const isSingle = isDisplaySingle;
@@ -1075,6 +1184,17 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* 0. 뷰어 홈으로 가기 (책 닫기) */}
+            {rawFiles.length > 0 && (
+              <button
+                onClick={handleGoHome}
+                className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
+                title="뷰어 홈으로 가기 (현재 책 닫기)"
+              >
+                <Home className="w-5 h-5 text-indigo-400" />
+              </button>
+            )}
+
             {/* 1. 파일 열기 (ZIP, CBZ 또는 이미지들) */}
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -1144,11 +1264,9 @@ export default function App() {
 
             <div className="w-[1px] h-5 bg-neutral-800 mx-0.5" />
 
-            {/* 보기 모드 전환 */}
+            {/* 보기 모드 전환 (페이지 위치 자동 보정) */}
             <button
-              onClick={() =>
-                setViewMode((m) => (m === 'spread' ? 'split' : m === 'split' ? 'pair' : 'spread'))
-              }
+              onClick={handleToggleViewMode}
               className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs sm:text-sm font-medium text-neutral-200 flex items-center gap-1.5 transition-colors shadow-sm min-h-[38px]"
               title="보기 모드 전환"
             >
@@ -1255,7 +1373,7 @@ export default function App() {
           >
             {isDisplaySingle ? (
               /* [가변 단면 표시 - 단면 표지/작가의 말 또는 분할 모드] */
-              <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
+              <div className="w-full h-full relative overflow-hidden flex items-center justify-center bg-[#f8f8f5]">
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(
@@ -1345,15 +1463,40 @@ export default function App() {
 
         {immersive && (tapAction === 'page' || showImmersiveControls) && (
           <>
+            {/* 우상단 전체화면 최소화 버튼 */}
             <button
               onClick={toggleFullscreen}
-              className="absolute top-4 right-4 p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg transition-opacity duration-200"
+              style={{
+                top: 'calc(1rem + env(safe-area-inset-top, 0px))',
+                right: 'calc(1rem + env(safe-area-inset-right, 0px))',
+              }}
+              className="absolute p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg transition-opacity duration-200 flex items-center justify-center"
               title="기본 모드로 복귀"
             >
               <Minimize2 className="w-5 h-5" />
             </button>
+
+            {/* 우하단 홈으로 가기 (책 닫기) 버튼 */}
+            <button
+              onClick={handleGoHome}
+              style={{
+                bottom: 'calc(1rem + env(safe-area-inset-bottom, 0px))',
+                right: 'calc(1rem + env(safe-area-inset-right, 0px))',
+              }}
+              className="absolute p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg transition-opacity duration-200 flex items-center justify-center active:scale-95"
+              title="뷰어 홈으로 가기 (책 닫기)"
+            >
+              <Home className="w-5 h-5 text-indigo-400" />
+            </button>
+
+            {/* 중앙 하단 페이지 번호 배지 */}
             {tapAction === 'menu' && (
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-1.5 bg-neutral-900/80 border border-neutral-700/60 rounded-full text-xs text-neutral-300 backdrop-blur shadow-lg pointer-events-none z-50 font-mono">
+              <div
+                style={{
+                  bottom: 'calc(1rem + env(safe-area-inset-bottom, 0px))',
+                }}
+                className="absolute left-1/2 -translate-x-1/2 px-4 py-1.5 bg-neutral-900/80 border border-neutral-700/60 rounded-full text-xs text-neutral-300 backdrop-blur shadow-lg pointer-events-none z-50 font-mono"
+              >
                 {String(currentIndex + 1) + ' / ' + String(pages.length)}
               </div>
             )}
