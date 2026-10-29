@@ -196,6 +196,110 @@ async function persistImagesList(files: { name: string; blob: Blob }[], bookTitl
   }
 }
 
+// --- 이미지 종횡비 기반 가변 스마트 스프레드 생성 함수 (모드 전환 시 위치 보존용) ---
+function buildSpreadsList(
+  rawFiles: RawImageFile[],
+  viewMode: ViewMode,
+  readingDirection: ReadingDirection
+): SpreadPage[] {
+  if (rawFiles.length === 0) return [];
+  const list: SpreadPage[] = [];
+  const isSpreadImage = (f: RawImageFile) => (f.aspect ? f.aspect >= 1.05 : false);
+
+  if (viewMode === 'split') {
+    rawFiles.forEach((f, idx) => {
+      if (isSpreadImage(f)) {
+        const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
+        const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
+
+        list.push({
+          title: f.name + ' (1/2)',
+          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
+          thumbUrl: f.url,
+          aspect: (f.aspect || 1.4) / 2,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 0,
+        });
+
+        list.push({
+          title: f.name + ' (2/2)',
+          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
+          thumbUrl: f.url,
+          aspect: (f.aspect || 1.4) / 2,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 1,
+        });
+      } else {
+        list.push({
+          title: f.name,
+          left: { url: f.url, slice: 'full', label: String(idx + 1) },
+          right: { url: f.url, slice: 'full', label: String(idx + 1) },
+          thumbUrl: f.url,
+          aspect: f.aspect || 0.7,
+          isSingle: true,
+          rawIndex: idx,
+          sliceIndex: 0,
+        });
+      }
+    });
+  } else {
+    let i = 0;
+    while (i < rawFiles.length) {
+      const f = rawFiles[i];
+      if (isSpreadImage(f)) {
+        list.push({
+          title: f.name,
+          left: { url: f.url, slice: 'left-half', label: String(i + 1) + 'L' },
+          right: { url: f.url, slice: 'right-half', label: String(i + 1) + 'R' },
+          thumbUrl: f.url,
+          aspect: f.aspect || 1.414,
+          isSingle: false,
+          rawIndex: i,
+          sliceIndex: 0,
+        });
+        i++;
+      } else {
+        const next = rawFiles[i + 1];
+        if (i === 0 || !next || isSpreadImage(next)) {
+          list.push({
+            title: f.name,
+            left: { url: f.url, slice: 'full', label: String(i + 1) },
+            right: { url: f.url, slice: 'full', label: String(i + 1) },
+            thumbUrl: f.url,
+            aspect: f.aspect || 0.7,
+            isSingle: true,
+            rawIndex: i,
+            sliceIndex: 0,
+          });
+          i++;
+        } else {
+          const f1 = f;
+          const f2 = next;
+          const leftFile = readingDirection === 'rtl' ? f2 : f1;
+          const rightFile = readingDirection === 'rtl' ? f1 : f2;
+          list.push({
+            title: f1.name + ' + ' + f2.name,
+            left: { url: leftFile.url, slice: 'full', label: leftFile.name },
+            right: { url: rightFile.url, slice: 'full', label: rightFile.name },
+            thumbUrl: f1.url,
+            aspect: ((f1.aspect || 0.7) + (f2.aspect || 0.7)),
+            isSingle: false,
+            rawIndex: i,
+            sliceIndex: 0,
+          });
+          i += 2;
+        }
+      }
+    }
+  }
+
+  return list;
+}
+
 export default function App() {
   // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
@@ -234,6 +338,23 @@ export default function App() {
     const saved = localStorage.getItem('foldbook_last_index');
     return saved ? parseInt(saved, 10) || 0 : 0;
   });
+
+  const pages = useMemo<SpreadPage[]>(() => {
+    return buildSpreadsList(rawFiles, viewMode, readingDirection);
+  }, [rawFiles, viewMode, readingDirection]);
+
+  // 페이지 인덱스 복구 및 안전 보정
+  useEffect(() => {
+    if (pages.length > 0) {
+      const savedIndex = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
+      if (savedIndex > 0 && savedIndex < pages.length && currentIndex === 0) {
+        setCurrentIndex(savedIndex);
+      } else if (currentIndex >= pages.length) {
+        setCurrentIndex(pages.length - 1);
+      }
+    }
+  }, [pages.length, currentIndex]);
+
 
   // 제본선 디폴트 OFF
   const [creaseEnabled, setCreaseEnabled] = useState<boolean>(() => {
@@ -478,128 +599,7 @@ export default function App() {
   }, [rawFiles]);
 
   // --- 페이지 구성 생성 (useMemo) ---
-  // --- 이미지 종횡비 기반 가변 스마트 스프레드 생성 함수 (모드 전환 시 위치 보존용) ---
-function buildSpreadsList(
-  rawFiles: RawImageFile[],
-  viewMode: ViewMode,
-  readingDirection: ReadingDirection
-): SpreadPage[] {
-  if (rawFiles.length === 0) return [];
-  const list: SpreadPage[] = [];
-  const isSpreadImage = (f: RawImageFile) => (f.aspect ? f.aspect >= 1.05 : false);
-
-  if (viewMode === 'split') {
-    rawFiles.forEach((f, idx) => {
-      if (isSpreadImage(f)) {
-        const firstSlice: SliceType = readingDirection === 'rtl' ? 'right-half' : 'left-half';
-        const secondSlice: SliceType = readingDirection === 'rtl' ? 'left-half' : 'right-half';
-
-        list.push({
-          title: f.name + ' (1/2)',
-          left: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-          right: { url: f.url, slice: firstSlice, label: String(idx + 1) + '-1' },
-          thumbUrl: f.url,
-          aspect: (f.aspect || 1.4) / 2,
-          isSingle: true,
-          rawIndex: idx,
-          sliceIndex: 0,
-        });
-
-        list.push({
-          title: f.name + ' (2/2)',
-          left: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-          right: { url: f.url, slice: secondSlice, label: String(idx + 1) + '-2' },
-          thumbUrl: f.url,
-          aspect: (f.aspect || 1.4) / 2,
-          isSingle: true,
-          rawIndex: idx,
-          sliceIndex: 1,
-        });
-      } else {
-        list.push({
-          title: f.name,
-          left: { url: f.url, slice: 'full', label: String(idx + 1) },
-          right: { url: f.url, slice: 'full', label: String(idx + 1) },
-          thumbUrl: f.url,
-          aspect: f.aspect || 0.7,
-          isSingle: true,
-          rawIndex: idx,
-          sliceIndex: 0,
-        });
-      }
-    });
-  } else {
-    let i = 0;
-    while (i < rawFiles.length) {
-      const f = rawFiles[i];
-      if (isSpreadImage(f)) {
-        list.push({
-          title: f.name,
-          left: { url: f.url, slice: 'left-half', label: String(i + 1) + 'L' },
-          right: { url: f.url, slice: 'right-half', label: String(i + 1) + 'R' },
-          thumbUrl: f.url,
-          aspect: f.aspect || 1.414,
-          isSingle: false,
-          rawIndex: i,
-          sliceIndex: 0,
-        });
-        i++;
-      } else {
-        const next = rawFiles[i + 1];
-        if (i === 0 || !next || isSpreadImage(next)) {
-          list.push({
-            title: f.name,
-            left: { url: f.url, slice: 'full', label: String(i + 1) },
-            right: { url: f.url, slice: 'full', label: String(i + 1) },
-            thumbUrl: f.url,
-            aspect: f.aspect || 0.7,
-            isSingle: true,
-            rawIndex: i,
-            sliceIndex: 0,
-          });
-          i++;
-        } else {
-          const f1 = f;
-          const f2 = next;
-          const leftFile = readingDirection === 'rtl' ? f2 : f1;
-          const rightFile = readingDirection === 'rtl' ? f1 : f2;
-          list.push({
-            title: f1.name + ' + ' + f2.name,
-            left: { url: leftFile.url, slice: 'full', label: leftFile.name },
-            right: { url: rightFile.url, slice: 'full', label: rightFile.name },
-            thumbUrl: f1.url,
-            aspect: ((f1.aspect || 0.7) + (f2.aspect || 0.7)),
-            isSingle: false,
-            rawIndex: i,
-            sliceIndex: 0,
-          });
-          i += 2;
-        }
-      }
-    }
-  }
-
-  return list;
-}
-
-  const pages = useMemo<SpreadPage[]>(() => {
-    return buildSpreadsList(rawFiles, viewMode, readingDirection);
-  }, [rawFiles, viewMode, readingDirection]);
-
-  // 페이지 인덱스 복구 및 안전 보정
-  useEffect(() => {
-    if (pages.length > 0) {
-      const savedIndex = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-      if (savedIndex > 0 && savedIndex < pages.length && currentIndex === 0) {
-        setCurrentIndex(savedIndex);
-      } else if (currentIndex >= pages.length) {
-        setCurrentIndex(pages.length - 1);
-      }
-    }
-  }, [pages.length, currentIndex]);
-
-
-  // --- 슬라이스 스타일 계산 헬퍼 ---
+    // --- 슬라이스 스타일 계산 헬퍼 ---
   const getSliceStyle = useCallback((desc?: HalfDescriptor): React.CSSProperties => {
     if (!desc) return {};
     if (desc.slice === 'left-half') {
@@ -652,49 +652,7 @@ function buildSpreadsList(
     return currentIdx !== -1 && currentIdx + 1 < archives.length;
   }, [currentArchiveName, archives]);
 
-  // --- 다음 권 불러오기 로직 연결 (폴더 핸들 및 다중 ZIP 메모리 맵 모두 지원) ---
-  const loadArchiveByIndex = useCallback(
-    async (nextArchiveName: string, shouldPreservePage = false) => {
-      try {
-        if (subDirsMapRef.current.has(nextArchiveName)) {
-          const imgs = subDirsMapRef.current.get(nextArchiveName)!;
-          await handleMultipleImageFiles(imgs, shouldPreservePage, nextArchiveName);
-          setCurrentArchiveName(nextArchiveName);
-          localStorage.setItem('foldbook_last_archive', nextArchiveName);
-          return;
-        }
-
-        let file: File | Blob | null = null;
-        if (zipFilesMapRef.current.has(nextArchiveName)) {
-          file = zipFilesMapRef.current.get(nextArchiveName)!;
-        } else if (dirHandle) {
-          file = await getArchiveFile(dirHandle, nextArchiveName);
-        }
-        if (file) {
-          await loadZipFile(file, shouldPreservePage);
-          setCurrentArchiveName(nextArchiveName);
-          localStorage.setItem('foldbook_last_archive', nextArchiveName);
-          if (!shouldPreservePage) setCurrentIndex(0);
-        }
-      } catch (err) {
-        console.error('다음 권 로드 실패:', err);
-      }
-    },
-    [dirHandle]
-  );
-
-  useEffect(() => {
-    goNextBookRef.current = () => {
-      if (!currentArchiveName || archives.length === 0) return;
-      const currentIdx = archives.indexOf(currentArchiveName);
-      if (currentIdx !== -1 && currentIdx + 1 < archives.length) {
-        const nextName = archives[currentIdx + 1];
-        loadArchiveByIndex(nextName, false);
-      }
-    };
-  }, [currentArchiveName, archives, loadArchiveByIndex]);
-
-  // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
+// --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
   const loadZipFile = async (file: File | Blob, shouldPreservePage = false) => {
     const fileName = 'name' in file ? file.name : (currentArchiveName || '단행본.zip');
     setBookTitle(fileName.replace(/\.(zip|cbz)$/i, ''));
@@ -808,6 +766,48 @@ function buildSpreadsList(
       setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
     }
   };
+
+  // --- 다음 권 불러오기 로직 연결 (폴더 핸들 및 다중 ZIP 메모리 맵 모두 지원) ---
+  const loadArchiveByIndex = useCallback(
+    async (nextArchiveName: string, shouldPreservePage = false) => {
+      try {
+        if (subDirsMapRef.current.has(nextArchiveName)) {
+          const imgs = subDirsMapRef.current.get(nextArchiveName)!;
+          await handleMultipleImageFiles(imgs, shouldPreservePage, nextArchiveName);
+          setCurrentArchiveName(nextArchiveName);
+          localStorage.setItem('foldbook_last_archive', nextArchiveName);
+          return;
+        }
+
+        let file: File | Blob | null = null;
+        if (zipFilesMapRef.current.has(nextArchiveName)) {
+          file = zipFilesMapRef.current.get(nextArchiveName)!;
+        } else if (dirHandle) {
+          file = await getArchiveFile(dirHandle, nextArchiveName);
+        }
+        if (file) {
+          await loadZipFile(file, shouldPreservePage);
+          setCurrentArchiveName(nextArchiveName);
+          localStorage.setItem('foldbook_last_archive', nextArchiveName);
+          if (!shouldPreservePage) setCurrentIndex(0);
+        }
+      } catch (err) {
+        console.error('다음 권 로드 실패:', err);
+      }
+    },
+    [dirHandle]
+  );
+
+  useEffect(() => {
+    goNextBookRef.current = () => {
+      if (!currentArchiveName || archives.length === 0) return;
+      const currentIdx = archives.indexOf(currentArchiveName);
+      if (currentIdx !== -1 && currentIdx + 1 < archives.length) {
+        const nextName = archives[currentIdx + 1];
+        loadArchiveByIndex(nextName, false);
+      }
+    };
+  }, [currentArchiveName, archives, loadArchiveByIndex]);
 
   // --- 이미지들이 담긴 폴더 선택 이벤트 핸들러 (웹킷 디렉터리 완벽 지원) ---
   const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
