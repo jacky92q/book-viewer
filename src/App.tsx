@@ -892,7 +892,7 @@ export default function App() {
           const blob = fileReq.result as Blob;
           const fileName = (nameReq.result as string) || '단행본.zip';
           const file = new File([blob], fileName);
-          await loadZipFile(file, true);
+          await loadZipFile(file, fileName);
         } else if (imagesReq.result && Array.isArray(imagesReq.result) && imagesReq.result.length > 0) {
           const imgItems = imagesReq.result as { name: string; blob: Blob }[];
           const title = (nameReq.result as string) || '단행본';
