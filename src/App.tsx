@@ -338,19 +338,33 @@ export default function App() {
     return saved ? parseInt(saved, 10) || 0 : 0;
   });
 
+  // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지)
+  const applyBookProgress = useCallback((bookKey: string, spreads: SpreadPage[]) => {
+    if (spreads.length === 0) {
+      setCurrentIndex(0);
+      return;
+    }
+    const saved = getBookProgress(bookKey);
+    if (saved) {
+      let matchIdx = spreads.findIndex((s) => s.rawIndex === saved.rawIndex);
+      if (matchIdx === -1) {
+        matchIdx = Math.min(saved.pageIndex, Math.max(0, spreads.length - 1));
+      }
+      setCurrentIndex(matchIdx);
+    } else {
+      setCurrentIndex(0);
+    }
+  }, [getBookProgress]);
+
+
   const pages = useMemo<SpreadPage[]>(() => {
     return buildSpreadsList(rawFiles, viewMode, readingDirection);
   }, [rawFiles, viewMode, readingDirection]);
 
-  // 페이지 인덱스 복구 및 안전 보정
+  // 페이지 인덱스 안전 범위 보정 (인덱스 초과 방지)
   useEffect(() => {
-    if (pages.length > 0) {
-      const savedIndex = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-      if (savedIndex > 0 && savedIndex < pages.length && currentIndex === 0) {
-        setCurrentIndex(savedIndex);
-      } else if (currentIndex >= pages.length) {
-        setCurrentIndex(pages.length - 1);
-      }
+    if (pages.length > 0 && currentIndex >= pages.length) {
+      setCurrentIndex(pages.length - 1);
     }
   }, [pages.length, currentIndex]);
 
@@ -642,10 +656,13 @@ export default function App() {
     return currentIdx !== -1 && currentIdx + 1 < archives.length;
   }, [currentArchiveName, archives]);
 
-// --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
-  const loadZipFile = async (file: File | Blob, shouldPreservePage = false) => {
-    const fileName = 'name' in file ? file.name : (currentArchiveName || '단행본.zip');
-    setBookTitle(fileName.replace(/\.(zip|cbz)$/i, ''));
+  // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
+  const loadZipFile = async (file: File | Blob, customTitle?: string) => {
+    const fileName = customTitle || ('name' in file ? file.name : (currentArchiveName || '단행본.zip'));
+    const title = fileName.replace(/\.(zip|cbz)$/i, '');
+    setBookTitle(title);
+    setCurrentArchiveName(fileName);
+    localStorage.setItem('foldbook_last_archive', fileName);
     
     // 영구 저장소(IndexedDB)에 활성 책 보관
     persistBookArchive(file, fileName);
@@ -679,25 +696,18 @@ export default function App() {
       };
     });
 
+    // 이전 URL 해제
+    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
     setRawFiles(loadedFiles);
-    // 책별 보관된 마지막 독서 위치 조회 및 복원
-    const savedBookProgress = getBookProgress(fileName);
-    if (savedBookProgress) {
-      const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
-      const matchIdx = targetSpreads.findIndex((s) => s.rawIndex === savedBookProgress.rawIndex);
-      setCurrentIndex(matchIdx !== -1 ? matchIdx : Math.min(savedBookProgress.pageIndex, Math.max(0, targetSpreads.length - 1)));
-    } else if (!shouldPreservePage) {
-      setCurrentIndex(0);
-    } else {
-      const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-      setCurrentIndex(saved > 0 && saved < loadedFiles.length ? saved : 0);
-    }
+
+    // 책별 보관된 마지막 독서 위치 조회 및 복원 (본 적 없으면 0번째 첫 페이지)
+    const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
+    applyBookProgress(fileName, targetSpreads);
   };
 
   // 일반 이미지 다중/폴더 선택 처리 (IndexedDB 영구 저장 및 폴더명 추출)
   const handleMultipleImageFiles = async (
     files: FileList | File[],
-    shouldPreservePage = false,
     customTitle?: string
   ) => {
     const valid = Array.from(files)
@@ -714,6 +724,8 @@ export default function App() {
     const folderName = relPath && relPath.includes('/') ? relPath.split('/')[0] : undefined;
     const title = customTitle || folderName || valid[0]?.name.split('.')[0] || '만화책 폴더';
     setBookTitle(title);
+    setCurrentArchiveName(title);
+    localStorage.setItem('foldbook_last_archive', title);
 
     // 이전 URL 해제
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
@@ -743,29 +755,19 @@ export default function App() {
     );
 
     setRawFiles(loaded);
-    // 폴더/이미지 책별 보관된 마지막 독서 위치 복원
-    const savedBookProgress = getBookProgress(title);
-    if (savedBookProgress) {
-      const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
-      const matchIdx = targetSpreads.findIndex((s) => s.rawIndex === savedBookProgress.rawIndex);
-      setCurrentIndex(matchIdx !== -1 ? matchIdx : Math.min(savedBookProgress.pageIndex, Math.max(0, targetSpreads.length - 1)));
-    } else if (!shouldPreservePage) {
-      setCurrentIndex(0);
-    } else {
-      const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-      setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
-    }
+
+    // 폴더/이미지 책별 보관된 마지막 독서 위치 복원 (본 적 없으면 0번째 첫 페이지)
+    const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
+    applyBookProgress(title, targetSpreads);
   };
 
   // --- 다음 권 불러오기 로직 연결 (폴더 핸들 및 다중 ZIP 메모리 맵 모두 지원) ---
   const loadArchiveByIndex = useCallback(
-    async (nextArchiveName: string, shouldPreservePage = false) => {
+    async (nextArchiveName: string) => {
       try {
         if (subDirsMapRef.current.has(nextArchiveName)) {
           const imgs = subDirsMapRef.current.get(nextArchiveName)!;
-          await handleMultipleImageFiles(imgs, shouldPreservePage, nextArchiveName);
-          setCurrentArchiveName(nextArchiveName);
-          localStorage.setItem('foldbook_last_archive', nextArchiveName);
+          await handleMultipleImageFiles(imgs, nextArchiveName);
           return;
         }
 
@@ -776,16 +778,13 @@ export default function App() {
           file = await getArchiveFile(dirHandle, nextArchiveName);
         }
         if (file) {
-          await loadZipFile(file, shouldPreservePage);
-          setCurrentArchiveName(nextArchiveName);
-          localStorage.setItem('foldbook_last_archive', nextArchiveName);
-          if (!shouldPreservePage) setCurrentIndex(0);
+          await loadZipFile(file, nextArchiveName);
         }
       } catch (err) {
         console.error('다음 권 로드 실패:', err);
       }
     },
-    [dirHandle]
+    [dirHandle, applyBookProgress, viewMode, readingDirection]
   );
 
   useEffect(() => {
@@ -794,7 +793,7 @@ export default function App() {
       const currentIdx = archives.indexOf(currentArchiveName);
       if (currentIdx !== -1 && currentIdx + 1 < archives.length) {
         const nextName = archives[currentIdx + 1];
-        loadArchiveByIndex(nextName, false);
+        loadArchiveByIndex(nextName);
       }
     };
   }, [currentArchiveName, archives, loadArchiveByIndex]);
@@ -855,7 +854,7 @@ export default function App() {
       localStorage.setItem('foldbook_archive_list', JSON.stringify(subNames));
       const firstSub = subNames[0];
       const firstImgs = subDirMap.get(firstSub)!;
-      await handleMultipleImageFiles(firstImgs, false, firstSub);
+      await handleMultipleImageFiles(firstImgs, firstSub);
       setCurrentArchiveName(firstSub);
       localStorage.setItem('foldbook_last_archive', firstSub);
       setShowDrawer(true);
@@ -864,7 +863,7 @@ export default function App() {
       const folderName = (images[0] as any).webkitRelativePath
         ? (images[0] as any).webkitRelativePath.split('/')[0]
         : '만화책 폴더';
-      await handleMultipleImageFiles(images, false, folderName);
+      await handleMultipleImageFiles(images, folderName);
     }
 
     e.target.value = '';
@@ -903,8 +902,8 @@ export default function App() {
             url: URL.createObjectURL(item.blob),
           }));
           setRawFiles(loaded);
-          const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
-          setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
+          const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
+          applyBookProgress(title, targetSpreads);
         }
       } catch (err) {
         console.warn('이전 세션 복원 건너뜀:', err);
@@ -935,7 +934,7 @@ export default function App() {
         setShowDrawer(true);
         const lastArch = localStorage.getItem('foldbook_last_archive');
         const target = lastArch && list.includes(lastArch) ? lastArch : list[0];
-        loadArchiveByIndex(target, target === lastArch);
+        loadArchiveByIndex(target);
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
