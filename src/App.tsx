@@ -14,7 +14,6 @@ import {
   X,
   Volume2,
   VolumeX,
-  Home,
 } from 'lucide-react';
 import * as fflate from 'fflate';
 import PageCurl from './PageCurlComponent';
@@ -514,26 +513,6 @@ export default function App() {
     setViewMode(nextMode);
     setCurrentIndex(matchIdx);
   }, [pages, currentIndex, viewMode, rawFiles, readingDirection]);
-
-  // --- 뷰어 홈으로 가기 (현재 책 닫기) ---
-  const handleGoHome = useCallback(() => {
-    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
-    if (bookKey && pages.length > 0 && pages[currentIndex]) {
-      saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
-    }
-    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
-    setRawFiles([]);
-    setCurrentIndex(0);
-    setBookTitle('FoldBook 뷰어');
-    setCurrentArchiveName(null);
-    localStorage.removeItem('foldbook_last_archive');
-    if (document.fullscreenElement) {
-      try {
-        document.exitFullscreen();
-      } catch {}
-    }
-    setImmersive(false);
-  }, [currentArchiveName, bookTitle, pages, currentIndex, rawFiles, saveBookProgress]);
 
   // --- 브라우저 OS 알림바 숨김 & 전체화면 토글 (HTML5 Fullscreen API) ---
   const toggleFullscreen = useCallback(async () => {
@@ -1184,16 +1163,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* 0. 뷰어 홈으로 가기 (책 닫기) */}
-            {rawFiles.length > 0 && (
-              <button
-                onClick={handleGoHome}
-                className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
-                title="뷰어 홈으로 가기 (현재 책 닫기)"
-              >
-                <Home className="w-5 h-5 text-indigo-400" />
-              </button>
-            )}
 
             {/* 1. 파일 열기 (ZIP, CBZ 또는 이미지들) */}
             <button
@@ -1474,19 +1443,6 @@ export default function App() {
               title="기본 모드로 복귀"
             >
               <Minimize2 className="w-5 h-5" />
-            </button>
-
-            {/* 우하단 홈으로 가기 (책 닫기) 버튼 */}
-            <button
-              onClick={handleGoHome}
-              style={{
-                bottom: 'calc(1rem + env(safe-area-inset-bottom, 0px))',
-                right: 'calc(1rem + env(safe-area-inset-right, 0px))',
-              }}
-              className="absolute p-2.5 bg-neutral-900/80 hover:bg-neutral-800 rounded-full text-neutral-300 z-50 backdrop-blur shadow-lg transition-opacity duration-200 flex items-center justify-center active:scale-95"
-              title="뷰어 홈으로 가기 (책 닫기)"
-            >
-              <Home className="w-5 h-5 text-indigo-400" />
             </button>
 
             {/* 중앙 하단 페이지 번호 배지 */}
