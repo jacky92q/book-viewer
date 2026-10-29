@@ -195,6 +195,30 @@ async function persistImagesList(files: { name: string; blob: Blob }[], bookTitl
   }
 }
 
+async function persistAllZipArchives(files: { name: string; blob: Blob }[]) {
+  try {
+    const db = await openFoldBookDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(files, 'all_zip_archives');
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; tx.onabort = rej; });
+  } catch (err) {
+    console.warn('전체 ZIP 목록 IndexedDB 저장 실패:', err);
+  }
+}
+
+async function persistAllSubDirs(subDirs: { name: string; files: { name: string; blob: Blob }[] }[]) {
+  try {
+    const db = await openFoldBookDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(subDirs, 'all_subdirs_cache');
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; tx.onabort = rej; });
+  } catch (err) {
+    console.warn('하위 폴더 목록 IndexedDB 저장 실패:', err);
+  }
+}
+
 // --- 이미지 종횡비 기반 가변 스마트 스프레드 생성 함수 (모드 전환 시 위치 보존용) ---
 function buildSpreadsList(
   rawFiles: RawImageFile[],
@@ -338,7 +362,7 @@ export default function App() {
     return saved ? parseInt(saved, 10) || 0 : 0;
   });
 
-  // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지)
+  // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지, 절대 마지막 페이지로 강제 클램핑하지 않음)
   const applyBookProgress = useCallback((bookKey: string, spreads: SpreadPage[]) => {
     if (spreads.length === 0) {
       setCurrentIndex(0);
@@ -346,14 +370,19 @@ export default function App() {
     }
     const saved = getBookProgress(bookKey);
     if (saved) {
-      let matchIdx = spreads.findIndex((s) => s.rawIndex === saved.rawIndex);
-      if (matchIdx === -1) {
-        matchIdx = Math.min(saved.pageIndex, Math.max(0, spreads.length - 1));
+      const matchIdx = spreads.findIndex((s) => s.rawIndex === saved.rawIndex);
+      if (matchIdx !== -1) {
+        setCurrentIndex(matchIdx);
+        return;
       }
-      setCurrentIndex(matchIdx);
-    } else {
-      setCurrentIndex(0);
+      // 유효한 범위의 이전 페이지 인덱스가 있으면 그 위치로 이동 (단, 범위 밖이거나 마지막 페이지 억지 매핑은 0으로)
+      if (saved.pageIndex >= 0 && saved.pageIndex < spreads.length && saved.rawIndex < spreads.length) {
+        setCurrentIndex(saved.pageIndex);
+        return;
+      }
     }
+    // 본 적이 없거나 다른 책의 인덱스가 섞인 경우: 무조건 0번째 첫 페이지
+    setCurrentIndex(0);
   }, [getBookProgress]);
 
 
@@ -422,6 +451,7 @@ export default function App() {
   const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mainLastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
+  const activeBookKeyRef = useRef<string | null>(null);
 
   // --- 상태 변경 시 LocalStorage 자동 저장 ---
   useEffect(() => {
@@ -445,11 +475,17 @@ export default function App() {
   }, [tapAction]);
 
   useEffect(() => {
+    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
+    if (!bookKey) return;
+
+    // 현재 로딩 완료된 활성 도서와 상태가 일치할 때만 진행도 저장 (전환 도중 이전 책의 인덱스가 새 책에 오염되는 것 차단)
+    if (activeBookKeyRef.current !== bookKey) return;
+
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
     if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
     localStorage.setItem('foldbook_last_index', String(currentIndex));
-    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
-    if (bookKey && pages.length > 0 && pages[currentIndex]) {
+
+    if (pages.length > 0 && pages[currentIndex]) {
       saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
     }
   }, [bookTitle, currentArchiveName, currentIndex, pages, saveBookProgress]);
@@ -660,9 +696,6 @@ export default function App() {
   const loadZipFile = async (file: File | Blob, customTitle?: string) => {
     const fileName = customTitle || ('name' in file ? file.name : (currentArchiveName || '단행본.zip'));
     const title = fileName.replace(/\.(zip|cbz)$/i, '');
-    setBookTitle(title);
-    setCurrentArchiveName(fileName);
-    localStorage.setItem('foldbook_last_archive', fileName);
     
     // 영구 저장소(IndexedDB)에 활성 책 보관
     persistBookArchive(file, fileName);
@@ -700,6 +733,12 @@ export default function App() {
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
     setRawFiles(loadedFiles);
 
+    // 새 도서 상태 및 활성 키 동기화
+    activeBookKeyRef.current = fileName;
+    setBookTitle(title);
+    setCurrentArchiveName(fileName);
+    localStorage.setItem('foldbook_last_archive', fileName);
+
     // 책별 보관된 마지막 독서 위치 조회 및 복원 (본 적 없으면 0번째 첫 페이지)
     const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
     applyBookProgress(fileName, targetSpreads);
@@ -723,9 +762,6 @@ export default function App() {
     const relPath = (valid[0] as any).webkitRelativePath as string | undefined;
     const folderName = relPath && relPath.includes('/') ? relPath.split('/')[0] : undefined;
     const title = customTitle || folderName || valid[0]?.name.split('.')[0] || '만화책 폴더';
-    setBookTitle(title);
-    setCurrentArchiveName(title);
-    localStorage.setItem('foldbook_last_archive', title);
 
     // 이전 URL 해제
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
@@ -756,6 +792,12 @@ export default function App() {
 
     setRawFiles(loaded);
 
+    // 새 도서 상태 및 활성 키 동기화
+    activeBookKeyRef.current = title;
+    setBookTitle(title);
+    setCurrentArchiveName(title);
+    localStorage.setItem('foldbook_last_archive', title);
+
     // 폴더/이미지 책별 보관된 마지막 독서 위치 복원 (본 적 없으면 0번째 첫 페이지)
     const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
     applyBookProgress(title, targetSpreads);
@@ -779,7 +821,12 @@ export default function App() {
         }
         if (file) {
           await loadZipFile(file, nextArchiveName);
+          return;
         }
+
+        // 파일이 메모리나 핸들에 없는 경우 사용자 안내
+        alert();
+        setShowDrawer(true);
       } catch (err) {
         console.error('다음 권 로드 실패:', err);
       }
@@ -811,8 +858,13 @@ export default function App() {
 
     if (zips.length > 0) {
       const map = new Map<string, File>();
-      zips.forEach((f) => map.set(f.name, f));
+      const persistItems: { name: string; blob: Blob }[] = [];
+      zips.forEach((f) => {
+        map.set(f.name, f);
+        persistItems.push({ name: f.name, blob: f });
+      });
       zipFilesMapRef.current = map;
+      persistAllZipArchives(persistItems);
       const names = zips.map((f) => f.name);
       setArchives(names);
       localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
@@ -850,6 +902,11 @@ export default function App() {
       // 여러 권의 하위 폴더가 감지된 경우: 도서 목록에 추가
       const subNames = Array.from(subDirMap.keys()).sort((a, b) => collator.compare(a, b));
       subDirsMapRef.current = subDirMap;
+      const persistSubDirs = subNames.map((name) => ({
+        name,
+        files: subDirMap.get(name)!.map((f) => ({ name: f.name, blob: f })),
+      }));
+      persistAllSubDirs(persistSubDirs);
       setArchives(subNames);
       localStorage.setItem('foldbook_archive_list', JSON.stringify(subNames));
       const firstSub = subNames[0];
@@ -881,10 +938,29 @@ export default function App() {
         const fileReq = store.get('current_archive_blob');
         const nameReq = store.get('current_archive_name');
         const imagesReq = store.get('current_images_list');
+        const allZipsReq = store.get('all_zip_archives');
+        const allSubDirsReq = store.get('all_subdirs_cache');
 
         await new Promise((res) => {
           tx.oncomplete = res;
         });
+
+        if (allZipsReq.result && Array.isArray(allZipsReq.result)) {
+          const zipMap = new Map<string, File>();
+          (allZipsReq.result as { name: string; blob: Blob }[]).forEach((item) => {
+            zipMap.set(item.name, new File([item.blob], item.name));
+          });
+          zipFilesMapRef.current = zipMap;
+        }
+
+        if (allSubDirsReq.result && Array.isArray(allSubDirsReq.result)) {
+          const subMap = new Map<string, File[]>();
+          (allSubDirsReq.result as { name: string; files: { name: string; blob: Blob }[] }[]).forEach((item) => {
+            const files = item.files.map((f) => new File([f.blob], f.name));
+            subMap.set(item.name, files);
+          });
+          subDirsMapRef.current = subMap;
+        }
 
         if (isCancelled) return;
 
@@ -896,7 +972,9 @@ export default function App() {
         } else if (imagesReq.result && Array.isArray(imagesReq.result) && imagesReq.result.length > 0) {
           const imgItems = imagesReq.result as { name: string; blob: Blob }[];
           const title = (nameReq.result as string) || '단행본';
+          activeBookKeyRef.current = title;
           setBookTitle(title);
+          setCurrentArchiveName(title);
           const loaded: RawImageFile[] = imgItems.map((item) => ({
             name: item.name,
             url: URL.createObjectURL(item.blob),
@@ -1067,7 +1145,7 @@ export default function App() {
 
     if (nextIdx < 0) return;
     if (nextIdx >= pages.length) {
-      if (hasNextBook && (readingDirection === 'rtl' ? dxClient > 0 : dxClient < 0)) {
+      if (hasNextBook) {
         d.atEndNext = true;
       }
       return;
@@ -1131,7 +1209,7 @@ export default function App() {
         const delta = isRightTap ? 1 : -1;
 
         const nextIdx = currentIndex + delta;
-        if (nextIdx >= pages.length && hasNextBook && (readingDirection === 'rtl' ? isRightTap : !isRightTap)) {
+        if (nextIdx >= pages.length && hasNextBook) {
           goNextBookRef.current();
           playPageSound();
           return;
@@ -1151,9 +1229,7 @@ export default function App() {
 
     if (d.atEndNext) {
       const dxClient = e.clientX - d.startX;
-      const isCompleteSwipe = readingDirection === 'rtl'
-        ? (d.vx > 0.15 || dxClient > d.w * 0.12)
-        : (d.vx < -0.15 || dxClient < -d.w * 0.12);
+      const isCompleteSwipe = d.vx > 0.08 || dxClient > 30 || Math.abs(dxClient) > d.w * 0.08;
       if (isCompleteSwipe) {
         goNextBookRef.current();
         playPageSound();
@@ -1243,8 +1319,13 @@ export default function App() {
 
                 if (zips.length > 0) {
                   const map = new Map<string, File>();
-                  zips.forEach((f) => map.set(f.name, f));
+                  const persistItems: { name: string; blob: Blob }[] = [];
+                  zips.forEach((f) => {
+                    map.set(f.name, f);
+                    persistItems.push({ name: f.name, blob: f });
+                  });
                   zipFilesMapRef.current = map;
+                  persistAllZipArchives(persistItems);
                   const names = zips.map((f) => f.name);
                   setArchives(names);
                   localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
@@ -1479,11 +1560,19 @@ export default function App() {
             {/* 중앙 제본선 음영은 펼침면 + creaseEnabled 일 때만 표시 (단면 표지에는 표시 안함) */}
             {!isDisplaySingle && creaseEnabled && <div className="center-crease" />}
 
-            {/* 권말 다음 권 안내 배너 */}
+            {/* 권말 다음 권 안내 배너 (클릭하여 즉시 열기 지원) */}
             {currentIndex === pages.length - 1 && hasNextBook && (
-              <div className="absolute bottom-5 sm:bottom-8 px-4 py-2 bg-indigo-950/90 border border-indigo-500/40 rounded-full text-indigo-200 text-xs sm:text-sm font-medium shadow-2xl pointer-events-none z-30 animate-pulse backdrop-blur">
-                마지막 페이지입니다. 다음으로 넘기면 다음 권이 열립니다.
-              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goNextBookRef.current();
+                  playPageSound();
+                }}
+                className="absolute bottom-5 sm:bottom-8 px-5 py-2.5 bg-indigo-900/90 hover:bg-indigo-800 border border-indigo-400/50 rounded-full text-indigo-100 text-xs sm:text-sm font-semibold shadow-2xl z-30 animate-pulse backdrop-blur cursor-pointer pointer-events-auto active:scale-95 transition-transform flex items-center gap-1.5"
+                title="클릭하여 다음 권 바로 열기"
+              >
+                <span>마지막 페이지입니다. 탭하여 다음 권 열기 →</span>
+              </button>
             )}
           </div>
         )}
