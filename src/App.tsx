@@ -233,6 +233,9 @@ export default function App() {
 
   const [dirHandle, setDirHandle] = useState<LibraryDirHandle | null>(null);
   const zipFilesMapRef = useRef<Map<string, File>>(new Map());
+  const subDirsMapRef = useRef<Map<string, File[]>>(new Map());
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [archives, setArchives] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('foldbook_archive_list');
@@ -565,6 +568,14 @@ export default function App() {
   const loadArchiveByIndex = useCallback(
     async (nextArchiveName: string, shouldPreservePage = false) => {
       try {
+        if (subDirsMapRef.current.has(nextArchiveName)) {
+          const imgs = subDirsMapRef.current.get(nextArchiveName)!;
+          await handleMultipleImageFiles(imgs, shouldPreservePage, nextArchiveName);
+          setCurrentArchiveName(nextArchiveName);
+          localStorage.setItem('foldbook_last_archive', nextArchiveName);
+          return;
+        }
+
         let file: File | Blob | null = null;
         if (zipFilesMapRef.current.has(nextArchiveName)) {
           file = zipFilesMapRef.current.get(nextArchiveName)!;
@@ -641,20 +652,35 @@ export default function App() {
     }
   };
 
-  // 일반 이미지 다중 선택 처리 (IndexedDB 영구 저장 연동)
-  const handleMultipleImageFiles = async (files: FileList | File[], shouldPreservePage = false) => {
+  // 일반 이미지 다중/폴더 선택 처리 (IndexedDB 영구 저장 및 폴더명 추출)
+  const handleMultipleImageFiles = async (
+    files: FileList | File[],
+    shouldPreservePage = false,
+    customTitle?: string
+  ) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
-      .sort((a, b) => collator.compare(a.name, b.name));
+      .sort((a, b) => {
+        const pathA = (a as any).webkitRelativePath || a.name;
+        const pathB = (b as any).webkitRelativePath || b.name;
+        return collator.compare(pathA, pathB);
+      });
 
     if (valid.length === 0) return;
 
-    const title = valid[0]?.name.split('.')[0] || '단행본';
+    const relPath = (valid[0] as any).webkitRelativePath as string | undefined;
+    const folderName = relPath && relPath.includes('/') ? relPath.split('/')[0] : undefined;
+    const title = customTitle || folderName || valid[0]?.name.split('.')[0] || '만화책 폴더';
     setBookTitle(title);
 
-    // IndexedDB에 이미지 블롭 영구 보관
-    const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
-    persistImagesList(persistItems, title);
+    // 이전 URL 해제
+    rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
+
+    // IndexedDB에 이미지 블롭 영구 보관 (에러 시 무시)
+    try {
+      const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
+      persistImagesList(persistItems, title);
+    } catch {}
 
     const loaded: RawImageFile[] = await Promise.all(
       valid.map(async (f) => {
@@ -681,6 +707,77 @@ export default function App() {
       const saved = parseInt(localStorage.getItem('foldbook_last_index') || '0', 10);
       setCurrentIndex(saved > 0 && saved < loaded.length ? saved : 0);
     }
+  };
+
+  // --- 이미지들이 담긴 폴더 선택 이벤트 핸들러 (웹킷 디렉터리 완벽 지원) ---
+  const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const fileList = Array.from(files);
+
+    // 1. 폴더 안에 ZIP/CBZ 압축 파일들이 담겨 있는 경우
+    const zips = fileList
+      .filter((f) => /\.(zip|cbz)$/i.test(f.name))
+      .sort((a, b) => collator.compare(a.name, b.name));
+
+    if (zips.length > 0) {
+      const map = new Map<string, File>();
+      zips.forEach((f) => map.set(f.name, f));
+      zipFilesMapRef.current = map;
+      const names = zips.map((f) => f.name);
+      setArchives(names);
+      localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
+      loadZipFile(zips[0]);
+      setCurrentArchiveName(zips[0].name);
+      localStorage.setItem('foldbook_last_archive', zips[0].name);
+      if (zips.length > 1) setShowDrawer(true);
+      e.target.value = '';
+      return;
+    }
+
+    // 2. 폴더 안에 이미지 파일들이 담겨 있는 경우
+    const images = fileList.filter((f) => IMAGE_EXT_REGEX.test(f.name));
+    if (images.length === 0) {
+      alert('선택한 폴더 안에 이미지 파일(JPG, PNG, WEBP 등)이나 ZIP 파일이 없습니다.');
+      e.target.value = '';
+      return;
+    }
+
+    // 하위 폴더별(1권, 2권 등) 분기 감지
+    const subDirMap = new Map<string, File[]>();
+    for (const f of images) {
+      const rel = (f as any).webkitRelativePath as string | undefined;
+      if (rel && rel.includes('/')) {
+        const parts = rel.split('/');
+        if (parts.length >= 3) {
+          const subName = parts[1];
+          if (!subDirMap.has(subName)) subDirMap.set(subName, []);
+          subDirMap.get(subName)!.push(f);
+        }
+      }
+    }
+
+    if (subDirMap.size > 1) {
+      // 여러 권의 하위 폴더가 감지된 경우: 도서 목록에 추가
+      const subNames = Array.from(subDirMap.keys()).sort((a, b) => collator.compare(a, b));
+      subDirsMapRef.current = subDirMap;
+      setArchives(subNames);
+      localStorage.setItem('foldbook_archive_list', JSON.stringify(subNames));
+      const firstSub = subNames[0];
+      const firstImgs = subDirMap.get(firstSub)!;
+      await handleMultipleImageFiles(firstImgs, false, firstSub);
+      setCurrentArchiveName(firstSub);
+      localStorage.setItem('foldbook_last_archive', firstSub);
+      setShowDrawer(true);
+    } else {
+      // 단일 이미지 폴더인 경우: 전체 이미지 즉시 로드
+      const folderName = (images[0] as any).webkitRelativePath
+        ? (images[0] as any).webkitRelativePath.split('/')[0]
+        : '만화책 폴더';
+      await handleMultipleImageFiles(images, false, folderName);
+    }
+
+    e.target.value = '';
   };
 
   // --- 앱 시작 시 이전 독서 세션 자동 복원 (IndexedDB + LocalStorage) ---
@@ -978,52 +1075,72 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* 파일 / 폴더 불러오기 */}
-            <label className="cursor-pointer p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm">
-              <FolderOpen className="w-5 h-5" />
-              <input
-                type="file"
-                accept=".zip,.cbz,image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  const files = e.target.files;
-                  if (!files || files.length === 0) return;
-                  const fileList = Array.from(files);
-                  const zips = fileList
-                    .filter((f) => /\.(zip|cbz)$/i.test(f.name))
-                    .sort((a, b) => collator.compare(a.name, b.name));
+            {/* 1. 파일 열기 (ZIP, CBZ 또는 이미지들) */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
+              title="파일 열기 (ZIP, CBZ 압축 파일 또는 이미지 여러 장)"
+            >
+              <FileArchive className="w-5 h-5 text-indigo-400" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip,.cbz,image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = e.target.files;
+                if (!files || files.length === 0) return;
+                const fileList = Array.from(files);
+                const zips = fileList
+                  .filter((f) => /\.(zip|cbz)$/i.test(f.name))
+                  .sort((a, b) => collator.compare(a.name, b.name));
 
-                  if (zips.length > 0) {
-                    const map = new Map<string, File>();
-                    zips.forEach((f) => map.set(f.name, f));
-                    zipFilesMapRef.current = map;
-                    const names = zips.map((f) => f.name);
-                    setArchives(names);
-                    localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
-                    loadZipFile(zips[0]);
-                    setCurrentArchiveName(zips[0].name);
-                    localStorage.setItem('foldbook_last_archive', zips[0].name);
-                    if (zips.length > 1) {
-                      setShowDrawer(true);
-                    }
-                  } else {
-                    handleMultipleImageFiles(fileList);
+                if (zips.length > 0) {
+                  const map = new Map<string, File>();
+                  zips.forEach((f) => map.set(f.name, f));
+                  zipFilesMapRef.current = map;
+                  const names = zips.map((f) => f.name);
+                  setArchives(names);
+                  localStorage.setItem('foldbook_archive_list', JSON.stringify(names));
+                  loadZipFile(zips[0]);
+                  setCurrentArchiveName(zips[0].name);
+                  localStorage.setItem('foldbook_last_archive', zips[0].name);
+                  if (zips.length > 1) {
+                    setShowDrawer(true);
                   }
-                  e.target.value = '';
-                }}
-              />
-            </label>
+                } else {
+                  handleMultipleImageFiles(fileList);
+                }
+                e.target.value = '';
+              }}
+            />
 
-            {supportsDirPicker() && (
-              <button
-                onClick={handlePickDirectory}
-                className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
-                title="책 폴더 전체 연결"
-              >
-                <FileArchive className="w-5 h-5" />
-              </button>
-            )}
+            {/* 2. 폴더 열기 (이미지 폴더 통째로 로드) */}
+            <button
+              onClick={() => {
+                if (supportsDirPicker()) {
+                  handlePickDirectory();
+                } else {
+                  folderInputRef.current?.click();
+                }
+              }}
+              className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 min-w-[38px] min-h-[38px] flex items-center justify-center transition-colors shadow-sm"
+              title="이미지/만화책 폴더 통째로 열기"
+            >
+              <FolderOpen className="w-5 h-5 text-amber-400" />
+            </button>
+            <input
+              ref={folderInputRef}
+              type="file"
+              // @ts-ignore
+              webkitdirectory=""
+              directory=""
+              multiple
+              className="hidden"
+              onChange={handleFolderChange}
+            />
 
             <div className="w-[1px] h-5 bg-neutral-800 mx-0.5" />
 
@@ -1090,11 +1207,35 @@ export default function App() {
         className={"relative flex-1 flex items-center justify-center overflow-hidden " + (immersive ? "p-0" : "p-2 sm:p-4")}
       >
         {pages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center text-neutral-500 gap-3">
-            <BookOpen className="w-14 h-14 stroke-[1.5] text-indigo-400/80" />
-            <p className="text-sm sm:text-base font-medium">
-              {isLoadingSaved ? '이전 독서 기록을 불러오는 중...' : 'ZIP, CBZ 파일이나 이미지 폴더를 열어주세요.'}
-            </p>
+          <div className="flex flex-col items-center justify-center text-neutral-400 gap-5 max-w-sm px-4 text-center">
+            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-3xl bg-indigo-950/60 border border-indigo-500/30 flex items-center justify-center shadow-2xl">
+              <BookOpen className="w-8 h-8 sm:w-10 sm:h-10 stroke-[1.5] text-indigo-400" />
+            </div>
+            <div>
+              <h2 className="text-base sm:text-lg font-bold text-neutral-100">만화책을 열어주세요</h2>
+              <p className="text-xs sm:text-sm text-neutral-400 mt-1">
+                {isLoadingSaved
+                  ? '이전 독서 기록을 불러오는 중...'
+                  : '이미지들이 담긴 폴더를 선택하거나 ZIP/CBZ 압축 파일을 열어보세요.'}
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5 w-full mt-1">
+              <button
+                onClick={() => folderInputRef.current?.click()}
+                className="flex-1 py-3 px-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg transition-transform active:scale-95"
+              >
+                <FolderOpen className="w-4 h-4 text-amber-300" />
+                <span>이미지 폴더 열기</span>
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex-1 py-3 px-4 rounded-2xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 border border-neutral-700/80 shadow transition-transform active:scale-95"
+              >
+                <FileArchive className="w-4 h-4 text-indigo-400" />
+                <span>ZIP / CBZ 파일</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div
