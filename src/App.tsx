@@ -326,19 +326,19 @@ function buildSpreadsList(
 export default function App() {
   // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
-  // --- 책별(권별) 독서 진행도 영구 보관 (LocalStorage) ---
+  // --- 책별(권별) 독서 진행도 영구 보관 (LocalStorage v2: 오염 방지 클린 스토리지) ---
   const saveBookProgress = useCallback((bookKey: string, rawIdx: number, pageIdx: number) => {
     if (!bookKey || bookKey === 'FoldBook 뷰어') return;
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_books_progress') || '{}');
+      const data = JSON.parse(localStorage.getItem('foldbook_books_progress_v2') || '{}');
       data[bookKey] = { rawIndex: rawIdx, pageIndex: pageIdx };
-      localStorage.setItem('foldbook_books_progress', JSON.stringify(data));
+      localStorage.setItem('foldbook_books_progress_v2', JSON.stringify(data));
     } catch {}
   }, []);
 
   const getBookProgress = useCallback((bookKey: string): { rawIndex: number; pageIndex: number } | null => {
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_books_progress') || '{}');
+      const data = JSON.parse(localStorage.getItem('foldbook_books_progress_v2') || '{}');
       return data[bookKey] || null;
     } catch {
       return null;
@@ -357,10 +357,7 @@ export default function App() {
     return (localStorage.getItem('foldbook_reading_dir') as ReadingDirection) || 'rtl';
   });
 
-  const [currentIndex, setCurrentIndex] = useState<number>(() => {
-    const saved = localStorage.getItem('foldbook_last_index');
-    return saved ? parseInt(saved, 10) || 0 : 0;
-  });
+  const [currentIndex, setCurrentIndex] = useState<number>(0);
 
   // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지, 절대 마지막 페이지로 강제 클램핑하지 않음)
   const applyBookProgress = useCallback((bookKey: string, spreads: SpreadPage[]) => {
@@ -483,7 +480,6 @@ export default function App() {
 
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
     if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
-    localStorage.setItem('foldbook_last_index', String(currentIndex));
 
     if (pages.length > 0 && pages[currentIndex]) {
       saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
@@ -825,7 +821,7 @@ export default function App() {
         }
 
         // 파일이 메모리나 핸들에 없는 경우 사용자 안내
-        alert();
+        alert("도서 파일을 찾을 수 없습니다. 도서 폴더를 다시 열어주세요.");
         setShowDrawer(true);
       } catch (err) {
         console.error('다음 권 로드 실패:', err);
