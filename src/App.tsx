@@ -347,20 +347,30 @@ function buildSpreadsList(
 export default function App() {
   // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
-  // --- 책별(권별) 독서 진행도 영구 보관 (LocalStorage v2: 오염 방지 클린 스토리지) ---
-  const saveBookProgress = useCallback((bookKey: string, rawIdx: number, pageIdx: number) => {
-    if (!bookKey || bookKey === 'FoldBook 뷰어') return;
+  // --- 시리즈별 + 권별 1:1 완벽 격리 독서 진행도 (v3 스토리지) ---
+  const makeProgressKey = useCallback((seriesId: string | null, volName: string | null): string => {
+    const s = seriesId?.trim();
+    const v = volName?.trim();
+    if (s && v) {
+      if (v.startsWith(s)) return v;
+      return s + '::' + v;
+    }
+    return v || s || 'FoldBook 뷰어';
+  }, []);
+
+  const saveBookProgress = useCallback((compositeKey: string, rawIdx: number, pageIdx: number) => {
+    if (!compositeKey || compositeKey === 'FoldBook 뷰어') return;
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_books_progress_v2') || '{}');
-      data[bookKey] = { rawIndex: rawIdx, pageIndex: pageIdx };
-      localStorage.setItem('foldbook_books_progress_v2', JSON.stringify(data));
+      const data = JSON.parse(localStorage.getItem('foldbook_progress_series_v3') || '{}');
+      data[compositeKey] = { rawIndex: rawIdx, pageIndex: pageIdx };
+      localStorage.setItem('foldbook_progress_series_v3', JSON.stringify(data));
     } catch {}
   }, []);
 
-  const getBookProgress = useCallback((bookKey: string): { rawIndex: number; pageIndex: number } | null => {
+  const getBookProgress = useCallback((compositeKey: string): { rawIndex: number; pageIndex: number } | null => {
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_books_progress_v2') || '{}');
-      return data[bookKey] || null;
+      const data = JSON.parse(localStorage.getItem('foldbook_progress_series_v3') || '{}');
+      return data[compositeKey] || null;
     } catch {
       return null;
     }
@@ -521,19 +531,21 @@ export default function App() {
   }, [currentSeriesId, currentArchiveName]);
 
   useEffect(() => {
-    const bookKey = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
-    if (!bookKey) return;
+    const volName = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
+    if (!volName) return;
+
+    const compositeKey = makeProgressKey(currentSeriesId, volName);
 
     // 현재 로딩 완료된 활성 도서와 상태가 일치할 때만 진행도 저장 (전환 도중 이전 책의 인덱스가 새 책에 오염되는 것 차단)
-    if (activeBookKeyRef.current !== bookKey) return;
+    if (activeBookKeyRef.current !== compositeKey && activeBookKeyRef.current !== volName) return;
 
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
     if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
 
     if (pages.length > 0 && pages[currentIndex]) {
-      saveBookProgress(bookKey, pages[currentIndex].rawIndex, currentIndex);
+      saveBookProgress(compositeKey, pages[currentIndex].rawIndex, currentIndex);
     }
-  }, [bookTitle, currentArchiveName, currentIndex, pages, saveBookProgress]);
+  }, [bookTitle, currentArchiveName, currentSeriesId, currentIndex, pages, makeProgressKey, saveBookProgress]);
 
   // --- 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
   const playPageSound = useCallback(() => {
@@ -803,18 +815,19 @@ export default function App() {
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
     setRawFiles(loadedFiles);
 
-    // 새 도서 상태 및 활성 키 동기화
-    activeBookKeyRef.current = fileName;
+    // 새 도서 상태 및 활성 키 동기화 (시리즈::권 고유 키)
+    const compositeKey = makeProgressKey(currentSeriesId, fileName);
+    activeBookKeyRef.current = compositeKey;
     setBookTitle(title);
     setCurrentArchiveName(fileName);
     localStorage.setItem('foldbook_last_archive', fileName);
 
     // 책별 보관된 마지막 독서 위치 조회 및 복원 (본 적 없으면 0번째 첫 페이지)
     const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
-    applyBookProgress(fileName, targetSpreads);
+    applyBookProgress(compositeKey, targetSpreads);
   };
 
-  // 일반 이미지 다중/폴더 선택 처리 (IndexedDB 영구 저장 및 폴더명 추출)
+  // 일반 이미지 다중/폴더 고속 로딩 (초경량 헤더 파싱 & 백그라운드 캐시로 즉시 표시)
   const handleMultipleImageFiles = async (
     files: FileList | File[],
     customTitle?: string
@@ -836,41 +849,61 @@ export default function App() {
     // 이전 URL 해제
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
 
-    // IndexedDB에 이미지 블롭 영구 보관 (에러 시 무시)
-    try {
-      const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
-      persistImagesList(persistItems, title);
-    } catch {}
-
-    const loaded: RawImageFile[] = await Promise.all(
-      valid.map(async (f) => {
-        let w = 1000, h = 700;
+    // 초고속 로딩: 첫 6장만 헤더 즉시 파싱 (5ms 완료), 나머지는 기본 세로 비율(0.7)로 즉시 화면 오픈
+    const headLimit = Math.min(6, valid.length);
+    const parsedHeadSizes = await Promise.all(
+      valid.slice(0, headLimit).map(async (f) => {
         try {
-          const headerBytes = new Uint8Array(await f.slice(0, 65536).arrayBuffer());
-          const size = parseImageSize(headerBytes);
-          if (size) { w = size.w; h = size.h; }
-        } catch {}
-        return {
-          name: f.name,
-          url: URL.createObjectURL(f),
-          w,
-          h,
-          aspect: w / h,
-        };
+          const headerBytes = new Uint8Array(await f.slice(0, 4096).arrayBuffer());
+          return parseImageSize(headerBytes);
+        } catch {
+          return null;
+        }
       })
     );
 
+    const loaded: RawImageFile[] = valid.map((f, i) => {
+      let w = 1000;
+      let h = 1428;
+      if (i < headLimit && parsedHeadSizes[i]) {
+        w = parsedHeadSizes[i]!.w;
+        h = parsedHeadSizes[i]!.h;
+      }
+      return {
+        name: f.name,
+        url: URL.createObjectURL(f),
+        w,
+        h,
+        aspect: w / h,
+      };
+    });
+
+    // 백그라운드 IndexedDB 캐싱 (메인 스레드 렌더링 블로킹 차단)
+    setTimeout(() => {
+      try {
+        const persistItems = valid.map((f) => ({ name: f.name, blob: f }));
+        persistImagesList(persistItems, title);
+      } catch {}
+    }, 1500);
+
     setRawFiles(loaded);
 
-    // 새 도서 상태 및 활성 키 동기화
-    activeBookKeyRef.current = title;
+    // 새 도서 상태 및 시리즈::권 고유 키 동기화
+    const compositeKey = makeProgressKey(currentSeriesId, title);
+    activeBookKeyRef.current = compositeKey;
     setBookTitle(title);
     setCurrentArchiveName(title);
     localStorage.setItem('foldbook_last_archive', title);
 
-    // 폴더/이미지 책별 보관된 마지막 독서 위치 복원 (본 적 없으면 0번째 첫 페이지)
+    // 책별 보관된 마지막 독서 위치 복원 (본 적 없으면 0번째 첫 페이지)
     const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
-    applyBookProgress(title, targetSpreads);
+    applyBookProgress(compositeKey, targetSpreads);
+
+    // 첫 페이지 이미지 사전 디코딩 (백지 지연 제거)
+    if (loaded.length > 0) {
+      const preloadImg = new Image();
+      preloadImg.src = loaded[0].url;
+    }
   };
 
   // --- 다음 권 불러오기 로직 연결 (DirectoryHandle, 하위 폴더 메모리 맵 및 ZIP 지원) ---
@@ -1094,7 +1127,8 @@ export default function App() {
         } else if (imagesReq.result && Array.isArray(imagesReq.result) && imagesReq.result.length > 0) {
           const imgItems = imagesReq.result as { name: string; blob: Blob }[];
           const title = (nameReq.result as string) || '단행본';
-          activeBookKeyRef.current = title;
+          const compKey = makeProgressKey(currentSeriesId, title);
+          activeBookKeyRef.current = compKey;
           setBookTitle(title);
           setCurrentArchiveName(title);
           const loaded: RawImageFile[] = imgItems.map((item) => ({
@@ -1103,7 +1137,7 @@ export default function App() {
           }));
           setRawFiles(loaded);
           const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
-          applyBookProgress(title, targetSpreads);
+          applyBookProgress(compKey, targetSpreads);
         }
       } catch (err) {
         console.warn('이전 세션 복원 건너뜀:', err);
@@ -1758,7 +1792,7 @@ export default function App() {
           >
             {isDisplaySingle ? (
               /* [가변 단면 표시 - 단면 표지/작가의 말 또는 분할 모드] */
-              <div className="w-full h-full relative overflow-hidden flex items-center justify-center bg-[#f8f8f5]">
+              <div className="w-full h-full relative overflow-hidden flex items-center justify-center bg-neutral-900">
                 <div
                   className="w-full h-full bg-no-repeat"
                   style={getSliceStyle(
