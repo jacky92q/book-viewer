@@ -880,22 +880,49 @@ export default function App() {
       return;
     }
 
-    // 하위 폴더별(1권, 2권 등) 분기 감지
+    // 하위 폴더별(만화책A/1권, 만화책A/2권 등) 분기 감지
+    const hasSubfolders = images.some((f) => {
+      const p = ((f as any).webkitRelativePath || f.name).split('/');
+      return p.length >= 3;
+    });
+
     const subDirMap = new Map<string, File[]>();
+    const rootImages: File[] = [];
+
     for (const f of images) {
       const rel = (f as any).webkitRelativePath as string | undefined;
       if (rel && rel.includes('/')) {
         const parts = rel.split('/');
-        if (parts.length >= 3) {
-          const subName = parts[1];
-          if (!subDirMap.has(subName)) subDirMap.set(subName, []);
-          subDirMap.get(subName)!.push(f);
+        if (hasSubfolders) {
+          if (parts.length >= 3) {
+            const subName = parts[1];
+            if (!subDirMap.has(subName)) subDirMap.set(subName, []);
+            subDirMap.get(subName)!.push(f);
+          } else {
+            rootImages.push(f);
+          }
+        } else {
+          if (parts.length === 2) {
+            const subName = parts[0];
+            if (!subDirMap.has(subName)) subDirMap.set(subName, []);
+            subDirMap.get(subName)!.push(f);
+          } else {
+            rootImages.push(f);
+          }
         }
+      } else {
+        rootImages.push(f);
       }
     }
 
-    if (subDirMap.size > 1) {
-      // 여러 권의 하위 폴더가 감지된 경우: 도서 목록에 추가
+    // 최상위에 단독 표지 이미지(cover.jpg 등)가 있고 하위 권들이 있는 경우 첫 권 앞에 포함
+    if (rootImages.length > 0 && subDirMap.size > 0) {
+      const sortedKeys = Array.from(subDirMap.keys()).sort((a, b) => collator.compare(a, b));
+      subDirMap.get(sortedKeys[0])!.unshift(...rootImages);
+    }
+
+    if (subDirMap.size > 0) {
+      // 1권 이상의 권별 하위 폴더가 감지된 경우: 도서 목록에 추가
       const subNames = Array.from(subDirMap.keys()).sort((a, b) => collator.compare(a, b));
       subDirsMapRef.current = subDirMap;
       const persistSubDirs = subNames.map((name) => ({
@@ -910,7 +937,7 @@ export default function App() {
       await handleMultipleImageFiles(firstImgs, firstSub);
       setCurrentArchiveName(firstSub);
       localStorage.setItem('foldbook_last_archive', firstSub);
-      setShowDrawer(true);
+      if (subNames.length > 1) setShowDrawer(true);
     } else {
       // 단일 이미지 폴더인 경우: 전체 이미지 즉시 로드
       const folderName = (images[0] as any).webkitRelativePath
@@ -992,7 +1019,7 @@ export default function App() {
     };
   }, []);
 
-  // 도서관 디렉터리 선택
+  // 도서관 디렉터리 선택 (ZIP/CBZ 및 만화책A/1권,2권... 하위 이미지 폴더 완벽 지원)
   const handlePickDirectory = async () => {
     if (!supportsDirPicker()) {
       alert('현재 브라우저에서는 폴더 선택 API를 지원하지 않습니다.');
@@ -1001,14 +1028,70 @@ export default function App() {
     try {
       const handle = await pickLibraryDir();
       setDirHandle(handle);
-      const list = await listArchives(handle);
-      setArchives(list);
-      localStorage.setItem('foldbook_archive_list', JSON.stringify(list));
-      if (list.length > 0) {
+
+      // 1. 디렉터리 내 ZIP/CBZ 아카이브 검사
+      let zipList: string[] = [];
+      try {
+        zipList = await listArchives(handle);
+      } catch {}
+
+      // 2. 만화책A 내 하위 폴더(1권, 2권 등) 이미지 검사
+      const subDirMap = new Map<string, File[]>();
+      const rootImages: File[] = [];
+
+      try {
+        for await (const [entryName, entry] of (handle as any).entries()) {
+          if (entry.kind === 'directory') {
+            const subFiles: File[] = [];
+            for await (const [subFileName, subFileEntry] of (entry as any).entries()) {
+              if (subFileEntry.kind === 'file' && IMAGE_EXT_REGEX.test(subFileName)) {
+                const f = await (subFileEntry as FileSystemFileHandle).getFile();
+                subFiles.push(f);
+              }
+            }
+            if (subFiles.length > 0) {
+              subFiles.sort((a, b) => collator.compare(a.name, b.name));
+              subDirMap.set(entryName, subFiles);
+            }
+          } else if (entry.kind === 'file' && IMAGE_EXT_REGEX.test(entryName)) {
+            rootImages.push(await (entry as FileSystemFileHandle).getFile());
+          }
+        }
+      } catch (scanErr) {
+        console.warn('하위 디렉터리 스캔 예외:', scanErr);
+      }
+
+      if (subDirMap.size > 0) {
+        // 만화책A/1권, 2권... 구조인 경우
+        const subNames = Array.from(subDirMap.keys()).sort((a, b) => collator.compare(a, b));
+        subDirsMapRef.current = subDirMap;
+        const persistSubDirs = subNames.map((name) => ({
+          name,
+          files: subDirMap.get(name)!.map((f) => ({ name: f.name, blob: f })),
+        }));
+        persistAllSubDirs(persistSubDirs);
+        setArchives(subNames);
+        localStorage.setItem('foldbook_archive_list', JSON.stringify(subNames));
+        const firstSub = subNames[0];
+        const firstImgs = subDirMap.get(firstSub)!;
+        await handleMultipleImageFiles(firstImgs, firstSub);
+        setCurrentArchiveName(firstSub);
+        localStorage.setItem('foldbook_last_archive', firstSub);
+        if (subNames.length > 1) setShowDrawer(true);
+      } else if (zipList.length > 0) {
+        // ZIP/CBZ 파일들이 있는 경우
+        setArchives(zipList);
+        localStorage.setItem('foldbook_archive_list', JSON.stringify(zipList));
         setShowDrawer(true);
         const lastArch = localStorage.getItem('foldbook_last_archive');
-        const target = lastArch && list.includes(lastArch) ? lastArch : list[0];
+        const target = lastArch && zipList.includes(lastArch) ? lastArch : zipList[0];
         loadArchiveByIndex(target);
+      } else if (rootImages.length > 0) {
+        // 단일 이미지 폴더인 경우
+        rootImages.sort((a, b) => collator.compare(a.name, b.name));
+        await handleMultipleImageFiles(rootImages, handle.name);
+      } else {
+        alert('선택한 폴더 안에 이미지 파일이나 압축 파일(ZIP/CBZ)이 없습니다.');
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
