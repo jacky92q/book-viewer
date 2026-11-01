@@ -203,7 +203,7 @@ async function persistImagesList(files: { name: string; blob: Blob }[], bookTitl
   }
 }
 
-async function saveSeriesDirHandle(seriesId: string, handle: FileSystemDirectoryHandle) {
+async function saveSeriesDirHandle(seriesId: string, handle: any) {
   try {
     const db = await openFoldBookDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -215,14 +215,14 @@ async function saveSeriesDirHandle(seriesId: string, handle: FileSystemDirectory
   }
 }
 
-async function getSeriesDirHandle(seriesId: string): Promise<FileSystemDirectoryHandle | null> {
+async function getSeriesDirHandle(seriesId: string): Promise<any> {
   try {
     const db = await openFoldBookDB();
     const tx = db.transaction(STORE_NAME, 'readonly');
     const store = tx.objectStore(STORE_NAME);
     const req = store.get('shelf_dir_' + seriesId);
     await new Promise((res) => { tx.oncomplete = res; });
-    return (req.result as FileSystemDirectoryHandle) || null;
+    return req.result || null;
   } catch {
     return null;
   }
@@ -437,7 +437,7 @@ export default function App() {
   const [dirHandle, setDirHandle] = useState<LibraryDirHandle | null>(null);
   const zipFilesMapRef = useRef<Map<string, File>>(new Map());
   const subDirsMapRef = useRef<Map<string, File[]>>(new Map());
-  const subDirHandlesRef = useRef<Map<string, FileSystemDirectoryHandle>>(new Map());
+  const subDirHandlesRef = useRef<Map<string, any>>(new Map());
   const allSeriesSubDirsMapRef = useRef<Map<string, Map<string, File[]>>>(new Map());
   const [seriesList, setSeriesList] = useState<ShelfSeries[]>(() => {
     try {
@@ -1120,7 +1120,7 @@ export default function App() {
 
   // --- 디렉터리 핸들 기반 고속 스캔 및 로드 (45권 이상도 0.1초 만에 로드) ---
   const scanAndLoadFromHandle = useCallback(
-    async (handle: FileSystemDirectoryHandle, initialTargetVolume?: string) => {
+    async (handle: any, initialTargetVolume?: string) => {
       // 0. 이전 만화책 상태 완전 클리어
       rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
       setRawFiles([]);
@@ -1129,15 +1129,15 @@ export default function App() {
       animatingRef.current = false;
 
       const seriesTitle = handle.name;
-      const subDirHandles = new Map<string, FileSystemDirectoryHandle>();
+      const subDirHandles = new Map<string, any>();
       let zipList: string[] = [];
       try {
-        zipList = await listArchives(handle);
+        zipList = await listArchives(handle as any);
       } catch {}
 
       for await (const [name, entry] of (handle as any).entries()) {
         if (entry.kind === 'directory') {
-          subDirHandles.set(name, entry as FileSystemDirectoryHandle);
+          subDirHandles.set(name, entry);
         }
       }
 
@@ -1180,7 +1180,7 @@ export default function App() {
         saveSeriesDirHandle(seriesTitle, handle);
 
         const target = initialTargetVolume && zipList.includes(initialTargetVolume) ? initialTargetVolume : zipList[0];
-        const file = await getArchiveFile(handle, target);
+        const file = await getArchiveFile(handle as any, target);
         if (file) {
           await loadZipFile(file, target);
           setCurrentArchiveName(target);
@@ -1266,7 +1266,7 @@ export default function App() {
           } catch {}
 
           if (hasPerm) {
-            setDirHandle(savedHandle);
+            setDirHandle(savedHandle as any);
             await scanAndLoadFromHandle(savedHandle, targetVol);
             return;
           }
