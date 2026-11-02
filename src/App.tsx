@@ -347,30 +347,22 @@ function buildSpreadsList(
 export default function App() {
   // --- 상태 관리 ---
   const [rawFiles, setRawFiles] = useState<RawImageFile[]>([]);
-  // --- 시리즈별 + 권별 1:1 완벽 격리 독서 진행도 (v3 스토리지) ---
-  const makeProgressKey = useCallback((seriesId: string | null, volName: string | null): string => {
-    const s = seriesId?.trim();
-    const v = volName?.trim();
-    if (s && v) {
-      if (v.startsWith(s)) return v;
-      return s + '::' + v;
-    }
-    return v || s || 'FoldBook 뷰어';
-  }, []);
-
-  const saveBookProgress = useCallback((compositeKey: string, rawIdx: number, pageIdx: number) => {
-    if (!compositeKey || compositeKey === 'FoldBook 뷰어') return;
+  // --- 시리즈별 + 권별 2단계 계층형 100% 독립 독서 진행도 (v4 스토리지) ---
+  const saveBookProgress = useCallback((seriesId: string, volName: string, rawIdx: number, pageIdx: number) => {
+    if (!seriesId || !volName || seriesId === 'FoldBook 뷰어') return;
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_progress_series_v3') || '{}');
-      data[compositeKey] = { rawIndex: rawIdx, pageIndex: pageIdx };
-      localStorage.setItem('foldbook_progress_series_v3', JSON.stringify(data));
+      const data = JSON.parse(localStorage.getItem('foldbook_series_progress_v4') || '{}');
+      if (!data[seriesId]) data[seriesId] = {};
+      data[seriesId][volName] = { rawIndex: rawIdx, pageIndex: pageIdx };
+      localStorage.setItem('foldbook_series_progress_v4', JSON.stringify(data));
     } catch {}
   }, []);
 
-  const getBookProgress = useCallback((compositeKey: string): { rawIndex: number; pageIndex: number } | null => {
+  const getBookProgress = useCallback((seriesId: string, volName: string): { rawIndex: number; pageIndex: number } | null => {
+    if (!seriesId || !volName) return null;
     try {
-      const data = JSON.parse(localStorage.getItem('foldbook_progress_series_v3') || '{}');
-      return data[compositeKey] || null;
+      const data = JSON.parse(localStorage.getItem('foldbook_series_progress_v4') || '{}');
+      return data[seriesId]?.[volName] || null;
     } catch {
       return null;
     }
@@ -390,26 +382,25 @@ export default function App() {
 
   const [currentIndex, setCurrentIndex] = useState<number>(0);
 
-  // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지, 절대 마지막 페이지로 강제 클램핑하지 않음)
-  const applyBookProgress = useCallback((bookKey: string, spreads: SpreadPage[]) => {
+  // 책 전환 시 저장된 독서 위치 적용 (없으면 0번째 첫 페이지, 다른 책 진행도 오염 원천 차단)
+  const applyBookProgress = useCallback((seriesId: string, volName: string, spreads: SpreadPage[]) => {
     if (spreads.length === 0) {
       setCurrentIndex(0);
       return;
     }
-    const saved = getBookProgress(bookKey);
+    const saved = getBookProgress(seriesId, volName);
     if (saved) {
       const matchIdx = spreads.findIndex((s) => s.rawIndex === saved.rawIndex);
       if (matchIdx !== -1) {
         setCurrentIndex(matchIdx);
         return;
       }
-      // 유효한 범위의 이전 페이지 인덱스가 있으면 그 위치로 이동 (단, 범위 밖이거나 마지막 페이지 억지 매핑은 0으로)
       if (saved.pageIndex >= 0 && saved.pageIndex < spreads.length && saved.rawIndex < spreads.length) {
         setCurrentIndex(saved.pageIndex);
         return;
       }
     }
-    // 본 적이 없거나 다른 책의 인덱스가 섞인 경우: 무조건 0번째 첫 페이지
+    // 본 적이 없는 새 권/새 시리즈: 무조건 첫 페이지(0p)
     setCurrentIndex(0);
   }, [getBookProgress]);
 
@@ -460,6 +451,8 @@ export default function App() {
   const [currentSeriesId, setCurrentSeriesId] = useState<string | null>(() => {
     return localStorage.getItem('foldbook_current_series_id') || null;
   });
+  const currentSeriesIdRef = useRef<string | null>(localStorage.getItem('foldbook_current_series_id') || null);
+  const isTransitioningRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [archives, setArchives] = useState<string[]>(() => {
@@ -531,21 +524,20 @@ export default function App() {
   }, [currentSeriesId, currentArchiveName]);
 
   useEffect(() => {
+    // 만화책/시리즈 전환 도중에는 절대 이전 위치를 새 책에 덮어쓰지 않음
+    if (isTransitioningRef.current) return;
+
+    const seriesId = currentSeriesIdRef.current || currentSeriesId;
     const volName = currentArchiveName || (bookTitle !== 'FoldBook 뷰어' ? bookTitle : null);
-    if (!volName) return;
-
-    const compositeKey = makeProgressKey(currentSeriesId, volName);
-
-    // 현재 로딩 완료된 활성 도서와 상태가 일치할 때만 진행도 저장 (전환 도중 이전 책의 인덱스가 새 책에 오염되는 것 차단)
-    if (activeBookKeyRef.current !== compositeKey && activeBookKeyRef.current !== volName) return;
+    if (!seriesId || !volName) return;
 
     if (bookTitle) localStorage.setItem('foldbook_last_book', bookTitle);
     if (currentArchiveName) localStorage.setItem('foldbook_last_archive', currentArchiveName);
 
     if (pages.length > 0 && pages[currentIndex]) {
-      saveBookProgress(compositeKey, pages[currentIndex].rawIndex, currentIndex);
+      saveBookProgress(seriesId, volName, pages[currentIndex].rawIndex, currentIndex);
     }
-  }, [bookTitle, currentArchiveName, currentSeriesId, currentIndex, pages, makeProgressKey, saveBookProgress]);
+  }, [bookTitle, currentArchiveName, currentSeriesId, currentIndex, pages, saveBookProgress]);
 
   // --- 리얼 책장 넘김 사운드 합성 (Web Audio API) ---
   const playPageSound = useCallback(() => {
@@ -770,12 +762,13 @@ export default function App() {
       localStorage.setItem('foldbook_series_shelf', JSON.stringify(updated));
       return updated;
     });
+    currentSeriesIdRef.current = id;
     setCurrentSeriesId(id);
     localStorage.setItem('foldbook_current_series_id', id);
   }, []);
 
   // --- ZIP/CBZ 압축 해제 및 이미지 로드 (IndexedDB 영구 저장 연동) ---
-  const loadZipFile = async (file: File | Blob, customTitle?: string) => {
+  const loadZipFile = async (file: File | Blob, customTitle?: string, targetSeriesId?: string) => {
     const fileName = customTitle || ('name' in file ? file.name : (currentArchiveName || '단행본.zip'));
     const title = fileName.replace(/\.(zip|cbz)$/i, '');
     
@@ -815,22 +808,25 @@ export default function App() {
     rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
     setRawFiles(loadedFiles);
 
-    // 새 도서 상태 및 활성 키 동기화 (시리즈::권 고유 키)
-    const compositeKey = makeProgressKey(currentSeriesId, fileName);
-    activeBookKeyRef.current = compositeKey;
+    // 새 도서 상태 및 시리즈::권 고유 키 동기화 (계층형 격리)
+    const seriesId = targetSeriesId || currentSeriesIdRef.current || currentSeriesId || title;
+    currentSeriesIdRef.current = seriesId;
+    activeBookKeyRef.current = fileName;
     setBookTitle(title);
     setCurrentArchiveName(fileName);
     localStorage.setItem('foldbook_last_archive', fileName);
 
-    // 책별 보관된 마지막 독서 위치 조회 및 복원 (본 적 없으면 0번째 첫 페이지)
+    // 책별 보관된 마지막 독서 위치 조회 및 복원 (시리즈+권 기준, 없으면 0p)
     const targetSpreads = buildSpreadsList(loadedFiles, viewMode, readingDirection);
-    applyBookProgress(compositeKey, targetSpreads);
+    applyBookProgress(seriesId, fileName, targetSpreads);
+    isTransitioningRef.current = false;
   };
 
   // 일반 이미지 다중/폴더 고속 로딩 (초경량 헤더 파싱 & 백그라운드 캐시로 즉시 표시)
   const handleMultipleImageFiles = async (
     files: FileList | File[],
-    customTitle?: string
+    customTitle?: string,
+    targetSeriesId?: string
   ) => {
     const valid = Array.from(files)
       .filter((f) => IMAGE_EXT_REGEX.test(f.name))
@@ -888,16 +884,18 @@ export default function App() {
 
     setRawFiles(loaded);
 
-    // 새 도서 상태 및 시리즈::권 고유 키 동기화
-    const compositeKey = makeProgressKey(currentSeriesId, title);
-    activeBookKeyRef.current = compositeKey;
+    // 새 도서 상태 및 시리즈::권 고유 키 동기화 (계층형 격리)
+    const seriesId = targetSeriesId || currentSeriesIdRef.current || currentSeriesId || folderName || title;
+    currentSeriesIdRef.current = seriesId;
+    activeBookKeyRef.current = title;
     setBookTitle(title);
     setCurrentArchiveName(title);
     localStorage.setItem('foldbook_last_archive', title);
 
-    // 책별 보관된 마지막 독서 위치 복원 (본 적 없으면 0번째 첫 페이지)
+    // 시리즈별::권별 보관된 마지막 독서 위치 복원 (시리즈+권 기준, 없으면 0p)
     const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
-    applyBookProgress(compositeKey, targetSpreads);
+    applyBookProgress(seriesId, title, targetSpreads);
+    isTransitioningRef.current = false;
 
     // 첫 페이지 이미지 사전 디코딩 (백지 지연 제거)
     if (loaded.length > 0) {
@@ -910,6 +908,8 @@ export default function App() {
   const loadArchiveByIndex = useCallback(
     async (nextArchiveName: string) => {
       try {
+        const seriesId = currentSeriesIdRef.current || currentSeriesId || 'FoldBook 뷰어';
+
         // A. FileSystemDirectoryHandle 하위 권 폴더가 있는 경우 (온디맨드 0.1초 로드)
         if (subDirHandlesRef.current.has(nextArchiveName)) {
           const targetHandle = subDirHandlesRef.current.get(nextArchiveName)!;
@@ -920,7 +920,7 @@ export default function App() {
             }
           }
           volFiles.sort((a, b) => collator.compare(a.name, b.name));
-          await handleMultipleImageFiles(volFiles, nextArchiveName);
+          await handleMultipleImageFiles(volFiles, nextArchiveName, seriesId);
           setCurrentArchiveName(nextArchiveName);
           localStorage.setItem('foldbook_last_archive', nextArchiveName);
           return;
@@ -929,7 +929,7 @@ export default function App() {
         // B. subDirsMapRef (메모리)에 있는 경우
         if (subDirsMapRef.current.has(nextArchiveName)) {
           const imgs = subDirsMapRef.current.get(nextArchiveName)!;
-          await handleMultipleImageFiles(imgs, nextArchiveName);
+          await handleMultipleImageFiles(imgs, nextArchiveName, seriesId);
           setCurrentArchiveName(nextArchiveName);
           localStorage.setItem('foldbook_last_archive', nextArchiveName);
           return;
@@ -943,7 +943,7 @@ export default function App() {
           file = await getArchiveFile(dirHandle, nextArchiveName);
         }
         if (file) {
-          await loadZipFile(file, nextArchiveName);
+          await loadZipFile(file, nextArchiveName, seriesId);
           setCurrentArchiveName(nextArchiveName);
           localStorage.setItem('foldbook_last_archive', nextArchiveName);
           return;
@@ -1004,7 +1004,7 @@ export default function App() {
       const seriesTitle = firstRel && firstRel.includes('/') ? firstRel.split('/')[0] : '압축 도서 모음';
       registerSeries(seriesTitle, seriesTitle, names, false);
 
-      await loadZipFile(zips[0]);
+      await loadZipFile(zips[0], zips[0].name, seriesTitle);
       setCurrentArchiveName(zips[0].name);
       localStorage.setItem('foldbook_last_archive', zips[0].name);
       if (zips.length > 1) setShowDrawer(true);
@@ -1076,14 +1076,14 @@ export default function App() {
 
       const firstSub = subNames[0];
       const firstImgs = subDirMap.get(firstSub)!;
-      await handleMultipleImageFiles(firstImgs, firstSub);
+      await handleMultipleImageFiles(firstImgs, firstSub, seriesTitle);
       setCurrentArchiveName(firstSub);
       localStorage.setItem('foldbook_last_archive', firstSub);
       if (subNames.length > 1) setShowDrawer(true);
     } else {
       // 단일 이미지 폴더인 경우: 전체 이미지 즉시 로드
       registerSeries(seriesTitle, seriesTitle, [seriesTitle], false);
-      await handleMultipleImageFiles(images, seriesTitle);
+      await handleMultipleImageFiles(images, seriesTitle, seriesTitle);
       setCurrentArchiveName(seriesTitle);
       localStorage.setItem('foldbook_last_archive', seriesTitle);
     }
@@ -1123,12 +1123,11 @@ export default function App() {
           const blob = fileReq.result as Blob;
           const fileName = (nameReq.result as string) || '단행본.zip';
           const file = new File([blob], fileName);
-          await loadZipFile(file, fileName);
+          await loadZipFile(file, fileName, currentSeriesId || fileName);
         } else if (imagesReq.result && Array.isArray(imagesReq.result) && imagesReq.result.length > 0) {
           const imgItems = imagesReq.result as { name: string; blob: Blob }[];
           const title = (nameReq.result as string) || '단행본';
-          const compKey = makeProgressKey(currentSeriesId, title);
-          activeBookKeyRef.current = compKey;
+          activeBookKeyRef.current = title;
           setBookTitle(title);
           setCurrentArchiveName(title);
           const loaded: RawImageFile[] = imgItems.map((item) => ({
@@ -1137,7 +1136,7 @@ export default function App() {
           }));
           setRawFiles(loaded);
           const targetSpreads = buildSpreadsList(loaded, viewMode, readingDirection);
-          applyBookProgress(compKey, targetSpreads);
+          applyBookProgress(currentSeriesId || title, title, targetSpreads);
         }
       } catch (err) {
         console.warn('이전 세션 복원 건너뜀:', err);
@@ -1154,7 +1153,9 @@ export default function App() {
 
   // --- 디렉터리 핸들 기반 고속 스캔 및 로드 (45권 이상도 0.1초 만에 로드) ---
   const scanAndLoadFromHandle = useCallback(
-    async (handle: any, initialTargetVolume?: string) => {
+    async (handle: any, initialTargetVolume?: string, explicitSeriesId?: string) => {
+      isTransitioningRef.current = true;
+
       // 0. 이전 만화책 상태 완전 클리어
       rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
       setRawFiles([]);
@@ -1162,7 +1163,10 @@ export default function App() {
       setCurl(null);
       animatingRef.current = false;
 
-      const seriesTitle = handle.name;
+      const seriesTitle = explicitSeriesId || handle.name;
+      currentSeriesIdRef.current = seriesTitle;
+      setCurrentSeriesId(seriesTitle);
+      localStorage.setItem('foldbook_current_series_id', seriesTitle);
       const subDirHandles = new Map<string, any>();
       let zipList: string[] = [];
       try {
@@ -1197,7 +1201,7 @@ export default function App() {
         }
         volFiles.sort((a, b) => collator.compare(a.name, b.name));
 
-        await handleMultipleImageFiles(volFiles, target);
+        await handleMultipleImageFiles(volFiles, target, seriesTitle);
         setCurrentArchiveName(target);
         localStorage.setItem('foldbook_last_archive', target);
         if (subNames.length > 1) setShowDrawer(true);
@@ -1216,7 +1220,7 @@ export default function App() {
         const target = initialTargetVolume && zipList.includes(initialTargetVolume) ? initialTargetVolume : zipList[0];
         const file = await getArchiveFile(handle as any, target);
         if (file) {
-          await loadZipFile(file, target);
+          await loadZipFile(file, target, seriesTitle);
           setCurrentArchiveName(target);
           localStorage.setItem('foldbook_last_archive', target);
         }
@@ -1235,7 +1239,7 @@ export default function App() {
         rootFiles.sort((a, b) => collator.compare(a.name, b.name));
         registerSeries(seriesTitle, seriesTitle, [seriesTitle], true);
         saveSeriesDirHandle(seriesTitle, handle);
-        await handleMultipleImageFiles(rootFiles, seriesTitle);
+        await handleMultipleImageFiles(rootFiles, seriesTitle, seriesTitle);
         setCurrentArchiveName(seriesTitle);
         localStorage.setItem('foldbook_last_archive', seriesTitle);
         return;
@@ -1269,13 +1273,15 @@ export default function App() {
       const targetSeries = seriesList.find((s) => s.id === seriesId);
       if (!targetSeries) return;
 
-      // 이전 만화책 상태 완전 클리어
+      // 이전 만화책 상태 완전 클리어 및 전환 가드 활성화
+      isTransitioningRef.current = true;
       rawFiles.forEach((f) => URL.revokeObjectURL(f.url));
       setRawFiles([]);
       setCurrentIndex(0);
       setCurl(null);
       animatingRef.current = false;
 
+      currentSeriesIdRef.current = seriesId;
       setCurrentSeriesId(seriesId);
       localStorage.setItem('foldbook_current_series_id', seriesId);
       setArchives(targetSeries.volumes);
@@ -1301,7 +1307,7 @@ export default function App() {
 
           if (hasPerm) {
             setDirHandle(savedHandle as any);
-            await scanAndLoadFromHandle(savedHandle, targetVol);
+            await scanAndLoadFromHandle(savedHandle, targetVol, seriesId);
             return;
           }
         } catch (e) {
@@ -1314,7 +1320,7 @@ export default function App() {
         const subMap = allSeriesSubDirsMapRef.current.get(seriesId)!;
         subDirsMapRef.current = subMap;
         if (subMap.has(targetVol)) {
-          await handleMultipleImageFiles(subMap.get(targetVol)!, targetVol);
+          await handleMultipleImageFiles(subMap.get(targetVol)!, targetVol, seriesId);
           setCurrentArchiveName(targetVol);
           localStorage.setItem('foldbook_last_archive', targetVol);
           return;
